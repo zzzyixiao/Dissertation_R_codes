@@ -1,0 +1,2164 @@
+---
+title: "Dissertation_R_codes_1"
+author: "Yvonne Zhang"
+output: html_document
+date: "2025-07-31"
+---
+
+# Preparation 
+
+```{r library package loading}
+# Uncomment and run this line if any packages are missing:
+# install.packages(c("kableExtra", "knitr", "tidyverse", "dplyr", "ggplot2", "kableExtra", "gridExtra", "ggsci", "RColorBrewer", "viridis","lattice", "caret", "vars", "scales", "jsonlite","sf", "stringr", "bestNormalize", "broom", "GGally", "quantreg","patchwork", "evd", "goftest", "ggpubr", "eva", "purrr", "simhelpers"))
+
+library(kableExtra)
+library(knitr)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(ggsci)
+library(RColorBrewer)
+library(viridis)
+library(lattice)
+library(caret)
+library(vars)
+library(scales)
+library(jsonlite)
+library(sf)
+library(stringr)
+library(bestNormalize)
+library(broom)
+library(GGally)
+library(quantreg)
+library(patchwork)
+library(evd) 
+library(goftest)
+library(ggpubr)
+library(eva)
+library(purrr)
+library(simhelpers)  
+```
+
+```{r Dataset loading}
+# Build the correct path to files stored in your local "data" folder
+data.path <- function(filename) {
+  file.path("data", filename)
+}
+ 
+EMDAT.UK.FLOOD <- read.csv(data.path("EMDAT.UK.FLOOD.csv")) 
+Nominal_GDP <- read.csv(data.path("Nominal_GDP.csv"), header = FALSE)[-1,]
+Deflator <- read.csv(data.path("Deflator.csv"), header = FALSE)[-1,]
+Population <- read.csv(data.path("Population.csv"), header = FALSE)[-1,]
+Exchange_rate <- read.csv(data.path("Exchange_rate.csv"))
+FAME <- read.csv(data.path("FAME.csv"))
+SIC <- read.csv(data.path("SIC.csv"))
+SSP_POP <- read.csv(data.path("SSP_POP.csv"))
+SSP_GDP <- read.csv(data.path("SSP_GDP.csv"))
+``` 
+
+```{r Dataset clean: GDP}
+colnames(Nominal_GDP) <- as.character(Nominal_GDP[1, ])
+colnames(Deflator) <- as.character(Deflator[1, ])
+colnames(Population) <- as.character(Population[1, ])
+
+Nominal2022 <- Nominal_GDP[,c(1,2,3,28)] %>% 
+                dplyr::mutate(across(4, ~ str_replace_all(., ",", ""))) %>%
+                dplyr::mutate(across(4, ~ as.numeric(.))) %>%
+                slice(-1)
+
+Nominal_GDP <- Nominal_GDP %>% 
+                dplyr::mutate(across(4:29, ~ str_replace_all(., ",", ""))) %>%
+                dplyr::mutate(across(4:29, ~ as.numeric(.))) %>%
+                slice(-1) %>%
+                dplyr::select("ITL1 Region", "LA code", "LA name",
+                              "2006", "2007", "2008", "2009", "2010",
+                              "2011", "2012", "2013", "2014", "2015", 
+                              "2016", "2017", "2018", "2019", "2020", "2021")
+
+Deflator <- Deflator %>% 
+                dplyr::mutate(across(4:29, ~ str_replace_all(., ",", ""))) %>%
+                dplyr::mutate(across(4:29, ~ as.numeric(.))) %>%
+                slice(-1) %>%
+                dplyr::select("ITL1 Region", "LA code", "LA name",
+                              "2006", "2007", "2008", "2009", "2010",
+                              "2011", "2012", "2013", "2014", "2015", 
+                              "2016", "2017", "2018", "2019", "2020", "2021")
+
+Real_GDP <- cbind(
+  Nominal_GDP[c("ITL1 Region", "LA code", "LA name")],  
+  Nominal_GDP[,4:19] / Deflator[,4:19]*100  
+)
+
+Real_GDP_GBP <- Real_GDP %>%
+  left_join(Nominal2022, by = "LA code") %>%
+  dplyr::select(ITL1.Region = "ITL1 Region.x", 
+                LA.code = "LA code", LA.name = "LA name.x",
+                "2006", "2007", "2008", "2009", "2010",
+                "2011", "2012", "2013", "2014", "2015", 
+                "2016", "2017", "2018", "2019", "2020", "2021", "2022")
+
+Exchange_rate <- Exchange_rate %>%
+  rename(er = "Official.exchange.rate..LCU.per.US...period.average...PA.NUS.FCRF.") %>%
+  dplyr::select(Time, er) %>%
+  pivot_wider(names_from = Time, values_from = er) 
+
+Exchange_rate_spanned <- Exchange_rate[rep(1,361),]
+
+Real_GDP_USD <- cbind(
+  Real_GDP_GBP[c("ITL1.Region", "LA.code", "LA.name")],   
+  Real_GDP_GBP[,4:20]*Exchange_rate_spanned[,1:17] 
+)
+
+England_regions <- c(
+  "North East ", "North West ", "Yorkshire and The Humber",
+  "East Midlands ", "West Midlands ", "East ",
+  "London", "South East ", "South West "
+)
+
+Real_GDP_USD <- Real_GDP_USD %>% 
+  mutate(
+    Region = case_when(
+      ITL1.Region %in% England_regions ~ "England",
+      ITL1.Region == "Wales"           ~ "Wales",
+      ITL1.Region == "Scotland"        ~ "Scotland",
+      ITL1.Region == "Northern Ireland"~ "Northern Ireland"
+    )
+  ) %>%
+  pivot_longer(
+    cols = -c(ITL1.Region, Region, LA.code, LA.name),
+    names_to = "Year",
+    values_to = "GDP"
+  ) %>%
+  mutate(
+    Year = as.integer(Year)
+  ) %>%
+  group_by(Region, Year) %>% 
+  summarise(
+    GDP_total = sum(GDP, na.rm = TRUE),
+    .groups = "drop"
+  ) 
+
+Real_GDP_USD <- Real_GDP_USD %>% 
+  dplyr::rename(GDP='GDP_total') %>%
+  pivot_wider(names_from = Region, values_from = GDP, 
+              names_glue = "{Region}.GDP")            
+```
+
+```{r Dataset clean: Population, warning=FALSE}
+pop_header <- as.character(unlist(Population[1, ]))
+names(Population) <- pop_header
+Population <- Population[-1, ]
+
+Population <- Population %>% 
+                dplyr::mutate(across(4:29, ~ str_replace_all(., ",", ""))) %>%
+                dplyr::mutate(across(4:29, ~ as.numeric(.))) %>%
+                dplyr::rename(ITL1.Region = 'ITL1 Region', 
+                       LA.code = 'LA code', LA.name = 'LA name') 
+
+Population <- Population %>% 
+                dplyr::mutate(
+                  Region = case_when(
+                    ITL1.Region %in% England_regions ~ "England",
+                    ITL1.Region == "Wales"           ~ "Wales",
+                    ITL1.Region == "Scotland"        ~ "Scotland",
+                    ITL1.Region == "Northern Ireland"~ "Northern Ireland"
+                  )
+                ) %>%
+                pivot_longer(
+                  cols = -c(ITL1.Region, Region, LA.code, LA.name),
+                  names_to = "Year",
+                  values_to = "Population"
+                ) %>%
+                mutate(
+                  Year = as.integer(Year)
+                ) %>%
+                group_by(Region, Year) %>%
+                summarise(
+                  Population_total = sum(Population, na.rm = TRUE),
+                  .groups = "drop"
+                ) 
+
+Population <- Population %>% 
+  dplyr::rename(Population='Population_total') %>%
+  pivot_wider(names_from = Region, values_from = Population, names_glue = "{Region}.Population")
+```
+
+
+```{r Dataset clean: EMDAT Detect UK countries}  
+EMDAT.UK.FLOOD <- EMDAT.UK.FLOOD %>%
+  mutate(
+    UK.country = str_c(
+      if_else(str_detect(Location, regex("england", ignore_case = TRUE)), "England; ", ""),
+      if_else(str_detect(Location, regex("lancaster", ignore_case = TRUE)), "England; ", ""),
+      if_else(str_detect(Location, regex("manchester", ignore_case = TRUE)), "England; ", ""),
+      if_else(str_detect(Location, regex("cumbria", ignore_case = TRUE)), "England; ", ""),
+      if_else(str_detect(Location, regex("derbyshire", ignore_case = TRUE)), "England; ", ""),
+      if_else(str_detect(Location, regex("scotland", ignore_case = TRUE)), "Scotland; ", ""),
+      if_else(str_detect(Location, regex("wales", ignore_case = TRUE)), "Wales; ", ""),
+      if_else(str_detect(Location, regex("anglesey", ignore_case = TRUE)), "Wales; ", ""),
+      if_else(str_detect(Location, regex("ireland", ignore_case = TRUE)), "Northern Ireland; ", ""),
+      if_else(str_detect(Location, regex("all country", ignore_case = TRUE)), "England; Scotland; Wales; Northern Ireland", ""),
+      sep = ""
+    ),
+    UK.country = str_remove(UK.country, ";\\s*$"),   
+    UK.country = na_if(UK.country, "")              
+  )
+```
+
+```{r Dataset clean: EMDAT flood column names} 
+EMDAT.UK.FLOOD <- EMDAT.UK.FLOOD %>%
+  rename(
+    Disaster.ID        = 'DisNo.',
+    AID.contribution   = 'AID.Contribution...000.US..', 
+    Recon.Costs        = 'Reconstruction.Costs...000.US..',
+    Recon.Costs.Adj    = 'Reconstruction.Costs..Adjusted...000.US..',
+    Insured.Damage     = 'Insured.Damage...000.US..',
+    Insured.Damage.Adj = 'Insured.Damage..Adjusted...000.US..',
+    Total.Damage       = 'Total.Damage...000.US..',
+    Total.Damage.Adj   = 'Total.Damage..Adjusted...000.US..'
+  )
+
+EMDAT.UK.FLOOD <- EMDAT.UK.FLOOD %>%
+  mutate(
+    Disaster.Subgroup = factor(Disaster.Subgroup, 
+                               levels = c("Hydrological")),
+    Disaster.Type = factor(Disaster.Type, 
+                           levels = c("Flood")),
+    OFDA.BHA.Response = factor(OFDA.BHA.Response, levels = c("No","Yes")),
+    Appeal = factor(Appeal, levels = c("No","Yes")),
+    Declaration = factor(Declaration, , levels = c("No","Yes")),
+    Recon.Costs.Adj = as.numeric(Recon.Costs.Adj),
+    Insured.Damage.Adj = as.numeric(Insured.Damage.Adj),
+    Total.Damage.Adj = as.numeric(Total.Damage.Adj)
+  ) 
+
+loss.metrics <- c("Total.Deaths", "Total.Affected", 
+                  "Recon.Costs.Adj", "Insured.Damage.Adj",
+                  "Total.Damage.Adj")
+grouping <- c("Disaster.Type", "Disaster.Subgroup", "Start.Year")
+
+columns.1 <- c("Disaster.ID","Disaster.Subgroup","Disaster.Type",
+               "Location", "Start.Date", "End.Date",
+               "Total.Deaths", "Total.Affected", "Total.Damage.Adj")
+
+simp.EMDAT.UK.FLOOD <- EMDAT.UK.FLOOD %>%
+  dplyr::mutate(Total.Damage.Adj = dplyr::if_else(is.na(Total.Damage.Adj), 0, Total.Damage.Adj)) %>%
+  dplyr::mutate(
+    Total.Affected = dplyr::if_else(is.na(Total.Affected), 0, Total.Affected),
+    Total.Deaths = dplyr::if_else(is.na(Total.Deaths), 0, Total.Deaths),
+    
+    Start.Day = dplyr::if_else(is.na(Start.Day), 15L, Start.Day),
+    
+    both_days_missing = is.na(Start.Day) & is.na(End.Day), 
+    Start.Day = dplyr::if_else(both_days_missing, 15L, Start.Day),  
+    
+    Start.Date = as.Date(lubridate::make_date(Start.Year, Start.Month, Start.Day))
+  ) %>%
+  dplyr::mutate(Total.Damage.Adj = Total.Damage.Adj*0.001) %>%
+  dplyr::select(Disaster.ID, UK.country, Disaster.Subgroup, Disaster.Type, Disaster.Subtype, 
+                Location, Declaration, 
+                Total.Deaths, Total.Affected, Total.Damage.Adj, 
+                Start.Year, Start.Date)
+```
+
+```{r Dataset clean: SIC}
+SIC <- SIC %>%
+  mutate(Category = factor(Category,levels = c("A","B","C", "D", "E", "F", "G", 
+                                           "H", "I", "J", "K", "L", "M", "N", 
+                                           "O", "P", "Q", "R", "S", "T", "U")))
+```
+
+```{r Dataset clean: FAME column names} 
+FAME <- FAME %>%
+  dplyr::mutate(
+    Region = str_c(
+      if_else(str_detect(R.O.NUTS.region, regex("England", ignore_case = TRUE)), 
+              "England; ", ""), 
+      if_else(str_detect(R.O.NUTS.region, regex("London", ignore_case = TRUE)), 
+              "England; ", ""), 
+      if_else(str_detect(R.O.NUTS.region, regex("Yorkshire", ignore_case = TRUE)), 
+              "England; ", ""), 
+      if_else(str_detect(R.O.NUTS.region, regex("Scotland", ignore_case = TRUE)), 
+              "Scotland; ", ""),
+      if_else(str_detect(R.O.NUTS.region, regex("Wales", ignore_case = TRUE)), 
+              "Wales; ", ""), 
+      if_else(str_detect(R.O.NUTS.region, regex("Northern ireland", ignore_case = TRUE)),
+              "Northern Ireland; ", ""),
+      sep = ""
+    ),
+    Region = str_remove(Region, ";\\s*$"),  
+    Region = na_if(Region, "")              
+  ) %>%
+  rename(SIC.Code = 'Primary.UK.SIC..2007..code') %>%
+  left_join(SIC, by = "SIC.Code", relationship = "many-to-many") %>%
+  dplyr::select(-Description) %>%
+  filter(!is.na(SIC.Code))
+
+identifier.cols = c("X","Company.name","R.O.NUTS.region","Region","SIC.Code")
+orig.metric.cols = 5:138
+
+cleaning.func <- function(x) {
+  x_clean <- x %>%
+    str_replace_all(",", "") %>%
+    str_replace_all(regex("n\\.a\\.", ignore_case = TRUE), "") %>%
+    str_replace_all(regex("n\\.s\\.", ignore_case = TRUE), "")
+  as.numeric(x_clean)
+}
+  
+FAME.detail <- FAME %>%
+  group_by(Category) %>%
+  dplyr::mutate(across(-all_of(identifier.cols ), cleaning.func)) %>%
+  ungroup() %>%
+  tidyr::pivot_longer(
+    cols = -c('X','Company.name','R.O.NUTS.region','Region','SIC.Code','Category'),
+    names_to = "MetricYear",
+    values_to = "Value"
+  ) %>%
+  dplyr::mutate(
+    Year = str_extract(MetricYear, "\\d{4}"),
+    Year = as.integer(Year),
+    Metric = str_remove(MetricYear, "\\d{4}$"),
+    Value = as.numeric(Value)
+  ) %>%
+  dplyr::select(X, Company.name, Region, SIC.Code, Category, Year, Metric, Value)
+
+FAME.new.detail <- FAME.detail %>%
+  dplyr::mutate(Metric = factor(Metric, 
+                         levels = c("Shareholders.Funds.th.USD.",             
+                                    "Current.Liabilities.th.USD.",            
+                                    "Long.Term.Liabilities.th.USD.",          
+                                    "Cash.In.Out.flow.Operat..Activ..th.USD.",              
+                                    "Turnover.th.USD.",                       
+                                    "Total.Assets.th.USD.",                   
+                                    "EBITDA.margin."))
+                                      ) %>%
+  pivot_wider(names_from = Metric, values_from = Value) %>%
+  rename(X = 'X', Shareholders.Funds = 'Shareholders.Funds.th.USD.',            
+         Current.Liabilities = 'Current.Liabilities.th.USD.',            
+         Long.Term.Liabilities = 'Long.Term.Liabilities.th.USD.',          
+         CF.Operat = 'Cash.In.Out.flow.Operat..Activ..th.USD.',                
+         Turnover = 'Turnover.th.USD.',                       
+         Total.Assets = 'Total.Assets.th.USD.',                   
+         EBITDA.Margin = 'EBITDA.margin.') %>%
+  dplyr::mutate(DE = (Current.Liabilities + Long.Term.Liabilities)/Shareholders.Funds,
+         TAT = Turnover/(Total.Assets),
+         OCF = CF.Operat/Current.Liabilities) %>%
+  dplyr::select(X, Year, Company.name, SIC.Code, Category, Region,
+               DE, TAT, OCF,
+               EBITDA.Margin)
+```
+
+```{r Dataset clean: FAME Industry Activities classification} 
+FAME.new.detail$SIC.Code <- ifelse(nchar(FAME.new.detail$SIC.Code) == 4,
+                      str_pad(FAME.new.detail$SIC.Code, 5, pad = "0"),
+                      as.character(FAME.new.detail$SIC.Code))
+
+FAME.act.detail <- FAME.new.detail %>%
+  mutate(Activities = case_when(
+    #Advanced Materials Production
+    str_starts(SIC.Code, "20") ~ "Upstream", 
+    #Highly Specialized Component Manufacturing / Precision Engineering
+    str_starts(SIC.Code, "26") ~ "Upstream", 
+    str_starts(SIC.Code, "27") ~ "Upstream",  
+    #Core Advanced Manufacturing/Assembly (examples by sector)
+    str_starts(SIC.Code, "28") ~ "Midstream", 
+    str_starts(SIC.Code, "29") ~ "Midstream", 
+    str_starts(SIC.Code, "30") ~ "Midstream", 
+    #Business support service not included
+    str_starts(SIC.Code, "451") ~ "Downstream", #sale of motor vehicles  
+    str_starts(SIC.Code, "469") ~ "Downstream", #non-specialised wholesale  
+    TRUE ~ NA_character_
+  )) 
+```
+
+```{r Dataset clean: SSP scenarios} 
+GDP17 <- Real_GDP_USD[which(Real_GDP_USD$Year=="2017"),] 
+GDP17.share <- GDP17 %>%
+  dplyr::mutate(
+    Total = England.GDP + Scotland.GDP + Wales.GDP + `Northern Ireland.GDP`,
+    E.share = round(England.GDP/Total,4),
+    S.share = round(Scotland.GDP/Total,4),
+    W.share = round(Wales.GDP/Total,4),
+    N.share = round(`Northern Ireland.GDP`/Total,4)) %>%
+  dplyr::select(E.share, S.share, W.share, N.share)
+
+POP17 <- Population[which(Population$Year=="2017"),] 
+POP17.share <- POP17 %>%
+  dplyr::mutate(
+    Total = England.Population + Scotland.Population + Wales.Population + `Northern Ireland.Population`,
+    E.share = round(England.Population/Total,4),
+    S.share = round(Scotland.Population/Total,4),
+    W.share = round(Wales.Population/Total,4),
+    N.share = round(`Northern Ireland.Population`/Total,4)) %>%
+  dplyr::select(E.share, S.share, W.share, N.share)
+
+fixed.death <- floor(mean(simp.EMDAT.UK.FLOOD$Total.Deaths))
+fixed.affected <- floor(mean(simp.EMDAT.UK.FLOOD$Total.Affected))
+
+SSP_POP <- SSP_POP %>%
+  rename_with(~str_remove(.x, "^X"), starts_with("X")) %>%
+  dplyr::select(Scenario, `2025`,`2030`,`2035`) %>%
+  dplyr::mutate(`2025`=1000000 * `2025`,`2030`=1000000 * `2030`,`2035`=1000000 * `2035`) %>%
+  slice_head(n = 2)
+
+SSP_GDP <- SSP_GDP %>%
+  rename_with(~str_remove(.x, "^X"), starts_with("X")) %>%
+  dplyr::select(Scenario, `2025`,`2030`,`2035`) %>%
+  dplyr::mutate(`2025`=1000 * `2025`,`2030`=1000 * `2030`,`2035`=1000 * `2035`) %>%
+  slice_head(n = 2)
+```
+
+# Summary statistics of datasets
+
+## EMDAT Summary
+
+```{r Summary statistic: EMDAT Flood overall}
+full.EMDAT.FLOOD <- EMDAT.UK.FLOOD %>%
+  dplyr::select(Disaster.ID, Classification.Key,
+         Disaster.Subgroup, Disaster.Type, Disaster.Subtype, Location,
+         OFDA.BHA.Response, Appeal, Declaration, 
+         Start.Year, Total.Deaths, Total.Affected, Total.Damage.Adj)
+
+loss.metrics <- c("Total.Deaths", "Total.Affected", "Total.Damage.Adj")
+
+EMDAT.FLOOD.loss.summary <- full.EMDAT.FLOOD %>%  
+  summarise(across(all_of(loss.metrics),
+                   list(
+                     Mean   = ~ mean(ifelse(is.na(.x), 0, .x)),
+                     Q1     = ~quantile(ifelse(is.na(.x), 0, .x), 0.25),
+                     Median = ~quantile(ifelse(is.na(.x), 0, .x), 0.5),
+                     Q3     = ~quantile(ifelse(is.na(.x), 0, .x), 0.75),
+                     Min    = ~ min(ifelse(is.na(.x), 0, .x)),
+                     Max    = ~ max(ifelse(is.na(.x), 0, .x)),
+                     sd     = ~ sd(ifelse(is.na(.x), 0, .x))
+                   ))) %>%
+  pivot_longer(cols = everything(),
+               names_to = c("Metric", "Stats"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = Stats, values_from = value)
+```
+
+```{r Summary statistic: EMDAT Flood by subtype} 
+EMDAT.FLOOD.subtype.count <- full.EMDAT.FLOOD %>%  
+  mutate(Disaster.Subtype = factor(Disaster.Subtype, 
+                                      levels = c("Flood (General)", 
+                                                 "Flash flood",
+                                                 "Riverine flood"))) %>%
+  count(Disaster.Subtype, name = "Number of occurences") %>%
+  mutate(NoO = "Number of occurences") %>%
+  pivot_wider(
+    names_from = Disaster.Subtype,
+    values_from = "Number of occurences"
+  ) %>%
+  column_to_rownames("NoO") %>%
+  dplyr::select(`Flood (General)`, `Flash flood`, `Riverine flood`)
+
+EMDAT.FLOOD.loss.summary.by.subtype <- full.EMDAT.FLOOD %>%  
+  mutate(Disaster.Subtype = factor(Disaster.Subtype, 
+                                      levels = c("Flood (General)", 
+                                                 "Flash flood",
+                                                 "Riverine flood"))) %>%
+  group_by(Disaster.Subtype) %>%
+  summarise(across(all_of(loss.metrics),
+                   list(
+                     Mean   = ~ mean(ifelse(is.na(.x), 0, .x)),
+                     Q1     = ~quantile(ifelse(is.na(.x), 0, .x), 0.25),
+                     Median = ~quantile(ifelse(is.na(.x), 0, .x), 0.5),
+                     Q3     = ~quantile(ifelse(is.na(.x), 0, .x), 0.75),
+                     Min    = ~ min(ifelse(is.na(.x), 0, .x)),
+                     Max    = ~ max(ifelse(is.na(.x), 0, .x)),
+                     sd     = ~ sd(ifelse(is.na(.x), 0, .x))
+                   ))) %>%
+  pivot_longer(cols = -Disaster.Subtype,
+               names_to = c("Metric", "Stats"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = Stats, values_from = value)
+```
+
+```{r Summary statistics: EMDAT Flood by year}
+EMDAT.FLOOD.loss.summary.by.year <- full.EMDAT.FLOOD %>% 
+  group_by(Start.Year) %>%
+  dplyr::summarise(across(all_of(loss.metrics),
+                   list(
+                     Mean   = ~ mean(ifelse(is.na(.x), 0, .x)),
+                     Q1     = ~quantile(ifelse(is.na(.x), 0, .x), 0.25),
+                     Median = ~quantile(ifelse(is.na(.x), 0, .x), 0.5),
+                     Q3     = ~quantile(ifelse(is.na(.x), 0, .x), 0.75),
+                     Min    = ~ min(ifelse(is.na(.x), 0, .x)),
+                     Max    = ~ max(ifelse(is.na(.x), 0, .x)),
+                     sd     = ~ sd(ifelse(is.na(.x), 0, .x))
+                   ))) %>%
+  pivot_longer(cols = -Start.Year,
+               names_to = c("Metric", "Stats"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = Stats, values_from = value) %>%
+  dplyr::mutate(Metric = factor(Metric, 
+                         levels = c("Total.Deaths", "Total.Affected", "Total.Damage.Adj"))) %>%
+  dplyr::mutate(IQR = Q3 - Q1) 
+```
+
+## FAME Summary
+
+```{r Summary statistics: FAME}
+act.count <- FAME.act.detail %>%
+  distinct(Company.name, Activities) %>%
+  mutate(Activities = replace_na(Activities, "Others")) %>%
+  count(Activities, name = "Number of companies") %>%
+  mutate(NoC = "Number of companies") %>%
+  pivot_wider(
+    names_from = Activities,
+    values_from = "Number of companies"
+  ) %>%
+  column_to_rownames("NoC") %>%
+  dplyr::select(Downstream, Midstream, Upstream, Others)
+
+cat.count <- FAME.act.detail %>%
+  distinct(Company.name, Category) %>%
+  count(Category, name = "Number of companies") %>%
+  mutate(NoC = "Number of companies") %>%
+  pivot_wider(
+    names_from = Category,
+    values_from = "Number of companies"
+  ) %>%
+  column_to_rownames("NoC") 
+
+new.metrics <- c("DE", "TAT", "OCF", "EBITDA.Margin")
+
+FAME.metric.summary <- FAME.act.detail %>%
+  filter(if_all(all_of(new.metrics), ~ !is.na(.x))) %>%
+  group_by(Category) %>%
+  summarise(across(all_of(new.metrics),
+                   list(
+                     Mean   = ~ mean(.x, na.rm = TRUE),
+                     Q1     = ~ quantile(.x, 0.25, na.rm = TRUE),
+                     Median = ~ quantile(.x, 0.50, na.rm = TRUE),
+                     Q3     = ~ quantile(.x, 0.75, na.rm = TRUE),
+                     Min    = ~ min(.x, na.rm = TRUE),
+                     Max    = ~ max(.x, na.rm = TRUE),
+                     sd     = ~ sd(.x, na.rm = TRUE)
+                   ))) %>%
+  ungroup() %>%
+  pivot_longer(cols = 2:29,
+               names_to = c("Metric", "Stats"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = Stats, values_from = value) %>% 
+  filter(Metric == "EBITDA.Margin" | Metric == "TAT" )
+
+FAME.regional.summary <- FAME.act.detail %>%
+  filter(if_all(all_of(new.metrics), ~ !is.na(.x))) %>%
+  group_by(Region) %>%
+  summarise(across(all_of(new.metrics),
+                   list(
+                     Mean   = ~ mean(.x, na.rm = TRUE),
+                     Q1     = ~ quantile(.x, 0.25, na.rm = TRUE),
+                     Median = ~ quantile(.x, 0.50, na.rm = TRUE),
+                     Q3     = ~ quantile(.x, 0.75, na.rm = TRUE),
+                     Min    = ~ min(.x, na.rm = TRUE),
+                     Max    = ~ max(.x, na.rm = TRUE),
+                     sd     = ~ sd(.x, na.rm = TRUE)
+                   ))) %>%
+  ungroup() %>%
+  pivot_longer(cols = 2:29,
+               names_to = c("Metric", "Stats"),
+               names_sep = "_") %>%
+  pivot_wider(names_from = Stats, values_from = value) %>% 
+  filter(Metric == "EBITDA.Margin" | Metric == "TAT" ) 
+```
+
+```{r Summary plots: FAME, fig.width=12, fig.height=4}
+Extended.colors <- colorRampPalette(brewer.pal(11, "RdYlGn"))(20)
+ggplot(FAME.metric.summary, aes(x=Metric, group=Category, fill= Category)) +
+  geom_boxplot(stat = "identity", 
+               aes(ymin = Min, lower = Q1, middle = Median, upper = Q3,ymax = Max),
+               width = 0.6) +
+  scale_fill_manual(values = Extended.colors) + 
+  facet_wrap(~ Metric, scales = "free") +
+  labs(title = "Boxplot of Metrics by Category",
+       y = "Value",
+       x = "Metric") +
+  theme_minimal()
+
+ggplot(FAME.regional.summary, aes(x=Metric, group=Region, fill=Region)) +
+  geom_boxplot(stat = "identity", 
+               aes(ymin = Min, lower = Q1, middle = Median, upper = Q3,ymax = Max),
+               width = 0.6) +
+  scale_fill_brewer(palette = "Set2") + 
+  facet_wrap(~ Metric, scales = "free") +
+  labs(title = "Boxplot of Metrics by Region",
+       y = "Value",
+       x = "Metric") +
+  theme_minimal() 
+```
+
+# Quantile regression
+
+## Disaster proxy construction
+
+```{r Joinning historical disaster population GDP data}
+year.grid <- expand.grid(
+  Start.Year = 2006:2022,
+  Disaster.Subgroup = levels(simp.EMDAT.UK.FLOOD$Disaster.Subgroup)
+) 
+
+UK.FLOOD.complete <- year.grid %>%
+  left_join(simp.EMDAT.UK.FLOOD, by = c("Start.Year", "Disaster.Subgroup"))  %>%
+  left_join(Real_GDP_USD, by = c("Start.Year" = "Year")) %>%
+  left_join(Population, by = c("Start.Year" = "Year")) %>%
+  drop_na()
+```
+
+```{r standardising composite} 
+UK.FLOOD.complete <- UK.FLOOD.complete %>%
+  dplyr::mutate(
+      E = str_detect(UK.country, "England"),
+      S = str_detect(UK.country, "Scotland"),
+      W = str_detect(UK.country, "Wales"),
+      N = str_detect(UK.country, "Northern Ireland")
+    ) %>%
+  rowwise() %>%
+  dplyr::mutate(
+    TGDP = sum(
+      c(E*`England.GDP`, S*`Scotland.GDP`, W*`Wales.GDP`, N*`Northern Ireland.GDP`), na.rm=TRUE
+    ),
+    TP = sum(
+      c(E*`England.Population`, S*`Scotland.Population`, W*`Wales.Population`, N*`Northern Ireland.Population`), na.rm=TRUE
+    )
+  ) %>%
+  ungroup()
+
+UK.FLOOD.complete <- UK.FLOOD.complete %>%
+  dplyr::mutate(
+    E.composite = 0.25*(Total.Deaths/(E+W+S+N))/`England.Population` + 0.25*(Total.Affected/(E+W+S+N))/`England.Population` + 0.25*(Total.Damage.Adj/(E+W+S+N))/`England.GDP` + 0.25,
+    S.composite = 0.25*(Total.Deaths/(E+W+S+N))/`Scotland.Population` + 0.25*(Total.Affected/(E+W+S+N))/`Scotland.Population` + 0.25*(Total.Damage.Adj/(E+W+S+N))/`Scotland.GDP` + 0.25,
+    W.composite = 0.25*(Total.Deaths/(E+W+S+N))/`Wales.Population` + 0.25*(Total.Affected/(E+W+S+N))/`Wales.Population` + 0.25*(Total.Damage.Adj/(E+W+S+N))/`Wales.GDP` + 0.25,
+    N.composite = 0.25*(Total.Deaths/(E+W+S+N))/`Northern Ireland.Population` + 0.25*(Total.Affected/(E+W+S+N))/`Northern Ireland.Population` + 0.25*(Total.Damage.Adj/(E+W+S+N))/`Northern Ireland.GDP` + 0.25) %>%
+  dplyr::mutate(
+    E.composite = if_else(E, E.composite, 0),
+    S.composite = if_else(S, S.composite, 0),
+    W.composite = if_else(W, W.composite, 0),
+    N.composite = if_else(N, N.composite, 0)
+  )
+```
+
+```{r aggregate yearly flood impact}
+FLOOD.annual.counts <- simp.EMDAT.UK.FLOOD %>%
+  dplyr::group_by(Start.Year, Disaster.Subgroup) %>%
+  summarise(Event.Count = n(), .groups = "drop") %>%
+  dplyr::mutate(Start.Year = as.integer(Start.Year)) %>%
+  dplyr::select(Start.Year, Disaster.Subgroup, Event.Count)
+
+FLOOD.IMPACT <- year.grid %>%
+  left_join(FLOOD.annual.counts, by = c("Start.Year", "Disaster.Subgroup")) %>%
+  replace_na(list(Event.Count = 0)) %>%
+  pivot_wider(names_from = Disaster.Subgroup, values_from = Event.Count, values_fill = 0) 
+
+UK.FLOOD.IMPACT <- UK.FLOOD.complete %>%
+  dplyr::select(Start.Year, Disaster.Subgroup, E, S, W, N, E.composite, S.composite, W.composite, N.composite) %>%
+  group_by(Start.Year) %>%
+  summarise(
+    E.count = sum(E),
+    S.count = sum(S),
+    W.count = sum(W),
+    N.count = sum(N),
+    E.t.composite = sum(E.composite),
+    S.t.composite = sum(S.composite),
+    W.t.composite = sum(W.composite),
+    N.t.composite = sum(N.composite),
+    .groups = "drop"
+  ) 
+```
+
+```{r FAME prep for FLOOD modelling}
+FAME.FLOOD.detail <- FAME.act.detail %>%
+  dplyr::mutate(
+      E = str_detect(Region, "England"),
+      S = str_detect(Region, "Scotland"),
+      W = str_detect(Region, "Wales"),
+      N = str_detect(Region, "Northern Ireland")
+    ) %>%  
+  dplyr::left_join(UK.FLOOD.IMPACT, by = c("Year" = "Start.Year")) %>%
+  tidyr::drop_na()  
+
+FAME.FLOOD.detail <- FAME.FLOOD.detail %>%
+  rowwise() %>%
+  dplyr::mutate(
+    company.composite = E*E.t.composite + S*S.t.composite + W*W.t.composite + N*N.t.composite) %>%
+  dplyr::select(Year, Company.name, Region, Category, Activities, DE, TAT, OCF, EBITDA.Margin, company.composite)
+
+FAME.FLOOD.detail <- FAME.FLOOD.detail %>%
+  dplyr::mutate(
+    U = as.integer(Activities == "Upstream"), 
+    D = as.integer(Activities == "Downstream"),
+    Region = as.factor(Region)
+  ) %>%
+  dplyr::mutate(across(c(11:12), ~ .x * company.composite))  
+```
+
+## Summary statistics of financial metrics
+
+### EBITDA Margin
+
+```{r Summary statistics of details: EBITDA.Margin}
+EBITDA.FLOOD.summary <- FAME.FLOOD.detail %>%
+  group_by(Year) %>%
+  summarise(
+    Q1 = quantile(EBITDA.Margin, 0.25, na.rm = TRUE),
+    Q3 = quantile(EBITDA.Margin, 0.75, na.rm = TRUE)
+  ) %>%
+  mutate(
+    IQR = Q3 - Q1,
+    LB = Q1 - 1.5 * IQR,
+    UB = Q3 + 1.5 * IQR
+  )   
+```
+
+```{r Summary statistics of details: EBITDA by industry}
+EBITDA.FLOOD.industry.summary <- FAME.FLOOD.detail %>%
+  group_by(Activities) %>%
+  summarise(
+    Metric = "EBITDA Margin",
+    Mean = mean(EBITDA.Margin),
+    Q1 = quantile(EBITDA.Margin, 0.25, na.rm = TRUE),
+    Median = quantile(EBITDA.Margin, 0.5, na.rm = TRUE),
+    Q3 = quantile(EBITDA.Margin, 0.75, na.rm = TRUE),
+    Min = min(EBITDA.Margin),
+    Max = max(EBITDA.Margin),
+    sd = sd(EBITDA.Margin),
+    n = n_distinct(Company.name)
+  )  
+```
+
+### TAT
+
+```{r Summary statistics of details: TAT}
+TAT.FLOOD.summary <- FAME.FLOOD.detail %>%
+  group_by(Year) %>%
+  summarise(
+    Q1 = quantile(TAT, 0.25, na.rm = TRUE),
+    Q3 = quantile(TAT, 0.75, na.rm = TRUE)
+  ) %>%
+  mutate(
+    IQR = Q3 - Q1,
+    LB = Q1 - 1.5 * IQR,
+    UB = Q3 + 1.5 * IQR
+  )  
+```
+
+```{r Summary statistics of details: TAT by industry}
+TAT.FLOOD.industry.summary <- FAME.FLOOD.detail %>%
+  group_by(Activities) %>%
+  summarise(
+    Metric = "TAT",
+    Mean = mean(TAT),
+    Q1 = quantile(TAT, 0.25, na.rm = TRUE),
+    Median = quantile(TAT, 0.5, na.rm = TRUE),
+    Q3 = quantile(TAT, 0.75, na.rm = TRUE),
+    Min = min(TAT),
+    Max = max(TAT),
+    sd = sd(TAT),
+    n = n_distinct(Company.name)
+  )  
+```
+
+### Summary visuals by industry
+
+```{r summary visuals by industry, fig.width=8, fig.height=6}
+Full.industry.summary <- bind_rows(TAT.FLOOD.industry.summary, 
+                                   EBITDA.FLOOD.industry.summary) %>%
+  arrange(Activities, Metric)
+
+ggplot(Full.industry.summary, aes(x=Metric, group=Activities, fill=Activities)) +
+  geom_boxplot(stat = "identity", 
+               aes(ymin = Min, lower = Q1, middle = Median, upper = Q3, ymax = Max),
+               width = 0.6) +
+  scale_fill_brewer(palette = "Set2") + 
+  facet_wrap(~ Metric, scales = "free") +
+  labs(title = "Boxplot of Metrics by Activities (Supply Chain Position)",
+       y = "Value",
+       x = "Metric") +
+  theme_minimal() 
+```
+
+## Validity pre-check
+
+### Correlation investigation
+
+#### Categorical covariate only
+
+```{r categocial correlation test} 
+kruskal.test(Region ~ EBITDA.Margin, data = FAME.FLOOD.detail)
+```
+
+#### All covariates
+
+```{r correlation with region, message=FALSE, fig.width=12, fig.height=10} 
+FAME.cor.data <- FAME.FLOOD.detail %>%
+  dplyr::select(EBITDA.Margin, TAT, Region, U, D)
+
+ggcorplot <- ggpairs(data = FAME.cor.data, aes(color = Region),        
+             upper = list(continuous = wrap("cor", size = 3)),
+             lower = list(continuous = wrap("points", alpha = 0.6, size = 1.5)),
+             diag  = list(continuous = wrap("densityDiag", alpha = 0.4))) 
+          
+  
+ggcorplot <- ggcorplot + 
+  scale_color_brewer(palette = "Set2") +
+  theme_minimal() 
+
+ggcorplot  
+```
+
+### Existence of regression
+
+```{r existence of regression}
+m0 <- lm(EBITDA.Margin ~ 1, data = FAME.FLOOD.detail)
+mfull <- lm(EBITDA.Margin ~ U + D + Region + U*Region + D*Region, data = FAME.FLOOD.detail)
+anova(m0, mfull) 
+anova(mfull)
+```
+
+## Quantile regression visuals
+
+### EBITDA visuals
+
+```{r rq visual preview, fig.width=8, fig.height=6}  
+taus = c(0.1,0.25,0.5,0.75,0.9)
+activity.colors <- c("Upstream" = "mediumseagreen",
+                     "Midstream" = "salmon2",
+                     "Downstream" = "slateblue3")
+
+point.colors <- activity.colors[FAME.FLOOD.detail$Activities]
+activities <- unique(FAME.FLOOD.detail$Activities)
+
+
+plot(EBITDA.Margin ~ company.composite, cex = 0.25, type = "n", 
+     xlab = "Company composite", ylab = "EBITDA Margin (%)", 
+     data = FAME.FLOOD.detail,
+     main = "Median (Quantile) vs OLS Regression Slopes by Supply Chain Position")
+
+points(FAME.FLOOD.detail$company.composite,
+       FAME.FLOOD.detail$EBITDA.Margin,
+       cex = 0.9, 
+       col = point.colors,
+       pch = c(0,1,2)) 
+
+for (act in activities) {
+  subdata <- subset(FAME.FLOOD.detail, Activities == act)
+  col <- activity.colors[act]
+   
+  rq_fit <- rq(EBITDA.Margin ~ company.composite, data = subdata, tau = 0.5)
+  abline(rq_fit, col = col, lwd = 2)
+   
+  lm_fit <- lm(EBITDA.Margin ~ company.composite, data = subdata)
+  abline(lm_fit, col = col, lty = 2, lwd = 1.5)
+}
+
+legend("bottomright",
+       legend = c("Upstream - Median", "Upstream - OLS",
+                  "Midstream - Median", "Midstream - OLS",
+                  "Downstream - Median", "Downstream - OLS"),
+       col = rep(activity.colors, each = 2),
+       lty = rep(c(1, 2), 3),  
+       lwd = rep(c(2, 1.5), 3),       
+       cex = 1,             
+       title = "Model Lines")
+```
+
+"As shown in Figure X, OLS regression slopes differ substantially from median regression lines, particularly for Midstream and Downstream firms. This divergence highlights the limitations of mean-based models in the presence of skewness or outliers. Quantile regression better captures the conditional distributional shifts, offering more reliable insights into how company composite scores relate to firm profitability across segments."
+
+```{r EBITDA confidence interval plot, fig.width=8, fig.height=6}
+taus <- seq(0.05, 0.95, by = 0.01)
+
+coef.collect.EBITDA <- function(tau_val) {
+  model <- rq(EBITDA.Margin ~ U + D + Region + U*Region + D*Region,
+              data = FAME.FLOOD.detail,
+              tau = tau_val,
+              method = "fn")
+  
+  summary(model, se = "boot")$coefficients %>%
+    as.data.frame() %>%
+    rownames_to_column("term") %>%
+    rename(
+      estimate   = 2,
+      std_error  = 3,
+      t_value    = 4,
+      p_value    = 5
+    ) %>%
+    mutate(
+      tau     = tau_val,
+      lower   = estimate - std_error,
+      upper   = estimate + std_error
+    ) 
+}
+
+all.EBITDA.coefs <- map_dfr(taus, coef.collect.EBITDA)
+
+all.EBITDA.coefs <- all.EBITDA.coefs %>%
+  mutate(term = factor(term, levels = rev(unique(term)))) 
+
+ols.ref <- lm(EBITDA.Margin ~ U + D + Region + U*Region + D*Region, data = FAME.FLOOD.detail)
+ols.coef <- tibble::tibble(
+  term = names(coef(ols.ref)),
+  ols_estimate = as.numeric(coef(ols.ref))
+)
+
+plot.EBITDA.ci <- all.EBITDA.coefs %>%
+  left_join(ols.coef, by = "term") %>%
+  mutate(term = factor(term, levels = rev(unique(term))))
+
+ggplot(plot.EBITDA.ci, aes(x = tau, y = estimate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "grey80", alpha = 0.5) +
+  geom_hline(aes(yintercept = ols_estimate), color = "red", linetype = "dashed") +
+  facet_wrap(~ term, scales = "free_y", ncol = 3) +
+  labs(title = "Ordinary Least Squares vs Quantile Regression Estimates for EBITDA Margin",
+       x = "Quantile (τ)", y = "Coefficient Estimate") +
+  theme_minimal()
+```
+
+### TAT visuals
+
+```{r TAT confidence interval plot, fig.width=8, fig.height=6}
+taus <- seq(0.05, 0.95, by = 0.01)
+
+coef.collect.TAT <- function(tau_val) {
+  model <- rq(TAT ~ U + D + Region + U*Region + D*Region,
+              data = FAME.FLOOD.detail,
+              tau = tau_val,
+              method = "fn")
+  
+  summary(model, se = "boot")$coefficients %>%
+    as.data.frame() %>%
+    rownames_to_column("term") %>%
+    rename(
+      estimate   = 2,
+      std_error  = 3,
+      t_value    = 4,
+      p_value    = 5
+    ) %>%
+    mutate(
+      tau     = tau_val,
+      lower   = estimate - std_error,
+      upper   = estimate + std_error
+    ) 
+}
+
+all.TAT.coefs <- map_dfr(taus, coef.collect.TAT)
+
+all.TAT.coefs <- all.TAT.coefs %>%
+  mutate(term = factor(term, levels = rev(unique(term)))) 
+
+ols.ref <- lm(TAT ~ U + D + Region + U*Region + D*Region, data = FAME.FLOOD.detail)
+ols.coef <- tibble::tibble(
+  term = names(coef(ols.ref)),
+  ols_estimate = as.numeric(coef(ols.ref))
+)
+
+plot.TAT.ci <- all.TAT.coefs %>%
+  left_join(ols.coef, by = "term") %>%
+  mutate(term = factor(term, levels = rev(unique(term))))
+
+ggplot(plot.TAT.ci, aes(x = tau, y = estimate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "grey80", alpha = 0.5) +
+  geom_hline(aes(yintercept = ols_estimate), color = "red", linetype = "dashed") +
+  facet_wrap(~ term, scales = "free_y", ncol = 3) +
+  labs(title = "Ordinary Least Squares vs Quantile Regression Estimates for TAT",
+       x = "Quantile (τ)", y = "Coefficient Estimate") +
+  theme_minimal()
+```
+
+## QR Fitting
+
+### EBITDA
+
+```{r EBITDA qr} 
+taus <- c(0.25, 0.5, 0.75)
+ 
+coef.collect.EBITDA <- function(tau_val) {
+  model <- rq(EBITDA.Margin ~ U + D + Region + U*Region + D*Region,
+              data = FAME.FLOOD.detail,
+              tau = tau_val,
+              method = "fn")
+  
+  summary(model, se = "boot")$coefficients %>%
+    as.data.frame() %>%
+    rownames_to_column("term") %>%
+    rename(
+      estimate   = 2,
+      std_error  = 3,
+      t_value    = 4,
+      p_value    = 5
+    ) %>%
+    mutate(
+      tau     = tau_val,
+      lower  = estimate - 1.96 * std_error,
+      upper  = estimate + 1.96 * std_error,
+    ) 
+}
+
+all.EBITDA.coefs <- map_dfr(taus, coef.collect.EBITDA)
+
+all.EBITDA.coefs <- all.EBITDA.coefs %>%
+  mutate(significant = ifelse(lower < 0 & upper > 0, "Not Significant", as.character(tau)))
+
+all.EBITDA.coefs <- all.EBITDA.coefs %>%
+  mutate(term = factor(term, levels = rev(unique(term))))
+```
+
+```{r coef CI EBITDA, fig.width=12, fig.height=8} 
+taus <- 1:9/10
+
+EBITDA.full.model <- rq(EBITDA.Margin ~ U + D + Region + U*Region + D*Region,
+                   data = FAME.FLOOD.detail,
+                   tau = taus,
+                   method = "fn",
+                   na.action = na.omit) 
+
+plot(summary(EBITDA.full.model, se = "boot")) 
+```
+
+```{r EBITDA coefficient significance plot, fig.width=12, fig.height=8}
+ggplot(all.EBITDA.coefs, aes(x = estimate, y = term)) +
+  geom_point(aes(color = significant), size = 2, position = position_dodge(width = 0.6)) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper, color = significant),
+                 height = 0.2, position = position_dodge(width = 0.6)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(
+    name = "Quantile (tau)",
+    values = c("0.25" = "chartreuse4", "0.5" = "brown3", "0.75" = "royalblue3", "Not Significant" = "gray")
+  ) +
+  labs(title = "EBITDA Quantile Regression Coefficients Across tau",
+       x = "Coefficient Estimate",
+       y = "Predictor") +
+  theme_minimal(base_size = 12)
+``` 
+
+### TAT
+
+```{r TAT qr} 
+taus <- c(0.25, 0.5, 0.75)
+
+coef.collect.TAT <- function(tau_val) {
+  model <- rq(TAT ~ U + D + Region + U*Region + D*Region,
+              data = FAME.FLOOD.detail,
+              tau = tau_val,
+              method = "fn")
+  
+  summary(model, se = "boot")$coefficients %>%
+    as.data.frame() %>%
+    rownames_to_column("term") %>%
+    rename(
+      estimate   = 2,
+      std_error  = 3,
+      t_value    = 4,
+      p_value    = 5
+    ) %>%
+    mutate(
+      tau     = tau_val,
+      lower   = estimate - std_error,
+      upper   = estimate + std_error
+    ) 
+}
+
+all.TAT.coefs <- map_dfr(taus, coef.collect.TAT)
+
+all.TAT.coefs <- all.TAT.coefs %>%
+  mutate(significant = ifelse(lower < 0 & upper > 0, "Not Significant", as.character(tau)))
+
+all.TAT.coefs <- all.TAT.coefs %>%
+  mutate(term = factor(term, levels = rev(unique(term))))
+```
+
+```{r coef CI TAT, fig.width=12, fig.height=8}  
+taus <- 1:9/10
+
+TAT.full.model <- rq(TAT ~ U + D + Region + U*Region + D*Region,
+                   data = FAME.FLOOD.detail,
+                   tau = taus,
+                   method = "fn",
+                   na.action = na.omit)
+
+plot(summary(TAT.full.model, se = "boot")) 
+```
+
+```{r TAT coefficient significance plot, fig.width=12, fig.height=8}
+ggplot(all.TAT.coefs, aes(x = estimate, y = term)) +
+  geom_point(aes(color = significant), size = 2, position = position_dodge(width = 0.6)) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper, color = significant),
+                 height = 0.2, position = position_dodge(width = 0.6)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_color_manual(
+    name = "Quantile (tau)",
+    values = c("0.25" = "chartreuse4", "0.5" = "brown3", "0.75" = "royalblue3", "Not Significant" = "gray")
+  ) +
+  labs(title = "TAT Quantile Regression Coefficients Across tau",
+       x = "Coefficient Estimate",
+       y = "Predictor") +
+  theme_minimal(base_size = 12)
+``` 
+
+## Goodness of fit
+
+### Pseudo R1
+
+```{r pseudo R1 prep}
+check_loss <- function(u, tau) {
+  u * (tau - (u < 0))
+}
+
+taus <- c(0.25, 0.5, 0.75)
+```
+
+```{r pseudo R1 EBITDA, message=FALSE} 
+model_list <- list(
+  `Intercept Only`        = EBITDA.Margin ~ 1,
+  `U+D`                   = EBITDA.Margin ~ U + D,
+  `Region Only`           = EBITDA.Margin ~ Region,
+  `U+D+Region`            = EBITDA.Margin ~ U + D + Region,
+  `U+D+Region+U:Region`   = EBITDA.Margin ~ U + D + Region + U*Region,
+  `U+D+Region+D:Region`   = EBITDA.Margin ~ U + D + Region + D*Region 
+)
+ 
+EBITDA.pseudoR1.tab <- map_dfr(taus, function(tau) {
+  full_model <- rq(EBITDA.Margin ~ U + D + Region + U*Region + D*Region,
+                   data = FAME.FLOOD.detail,
+                   tau = tau,
+                   method = "fn",
+                   na.action = na.omit)
+
+  v_hat <- sum(check_loss(residuals(full_model), tau))
+
+  R1_row <- map_dfc(model_list, function(restricted_formula) {
+    restricted_model <- rq(restricted_formula,
+                           data = FAME.FLOOD.detail,
+                           tau = tau,
+                           method = "fn",
+                           na.action = na.omit)
+    v_tilde <- sum(check_loss(residuals(restricted_model), tau))
+    R1 <- 1 - v_hat / v_tilde
+    return(tibble(R1 = R1))
+  })
+
+  colnames(R1_row) <- names(model_list)
+  R1_row <- R1_row %>% mutate(tau = tau, .before = 1)
+  return(R1_row)
+}) 
+```
+
+```{r pseudo R1 TAT, message=FALSE} 
+check_loss <- function(u, tau) {
+  u * (tau - (u < 0))
+}
+
+taus <- c(0.25, 0.5, 0.75)
+
+model_list <- list(
+  `Intercept Only`        = TAT ~ 1,
+  `U+D`                   = TAT ~ U + D,
+  `Region Only`           = TAT ~ Region,
+  `U+D+Region`            = TAT ~ U + D + Region,
+  `U+D+Region+U:Region`   = TAT ~ U + D + Region + U*Region,
+  `U+D+Region+D:Region`   = TAT ~ U + D + Region + D*Region 
+)
+ 
+TAT.pseudoR1.tab <- map_dfr(taus, function(tau) {
+  full_model <- rq(TAT ~ U + D + Region + U*Region + D*Region,
+                   data = FAME.FLOOD.detail,
+                   tau = tau,
+                   method = "fn",
+                   na.action = na.omit)
+
+  v_hat <- sum(check_loss(residuals(full_model), tau))
+
+  R1_row <- map_dfc(model_list, function(restricted_formula) {
+    restricted_model <- rq(restricted_formula,
+                           data = FAME.FLOOD.detail,
+                           tau = tau,
+                           method = "fn",
+                           na.action = na.omit)
+    v_tilde <- sum(check_loss(residuals(restricted_model), tau))
+    R1 <- 1 - v_hat / v_tilde
+    return(tibble(R1 = R1))
+  })
+
+  colnames(R1_row) <- names(model_list)
+  R1_row <- R1_row %>% mutate(tau = tau, .before = 1)
+  return(R1_row)
+}) 
+```
+
+```{r R1 plots, fig.width=12, fig.height=8}
+EBITDA.pseudoR1.long <- EBITDA.pseudoR1.tab %>%
+  pivot_longer(cols = -tau, names_to = "Model", values_to = "R1")
+
+EBITDA.pseudoR1.long.plot <- ggplot(EBITDA.pseudoR1.long, aes(x = Model, y = R1, fill = as.factor(tau))) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  labs(
+    title = "Improvement of Full Model over Restricted Models\nfor EBITDA Margin: Pseudo R¹", 
+    x = "Model",
+    y = expression(paste("Pseudo ", R^1, " (1 - ", hat(V), "/", tilde(V), ")")),
+    fill = expression(tau)
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+
+TAT.pseudoR1.long <- TAT.pseudoR1.tab %>%
+  pivot_longer(cols = -tau, names_to = "Model", values_to = "R1")
+
+TAT.pseudoR1.long.plot <- ggplot(TAT.pseudoR1.long, aes(x = Model, y = R1, fill = as.factor(tau))) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  labs(
+    title = "Improvement of Full Model over Restricted Models\nfor TAT: Pseudo R¹", 
+    x = "Model",
+    y = expression(paste("Pseudo ", R^1, " (1 - ", hat(V), "/", tilde(V), ")")),
+    fill = expression(tau)
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "right"
+  )
+EBITDA.pseudoR1.long.plot + TAT.pseudoR1.long.plot + plot_layout(ncol = 2)
+```
+
+# Monte Carlo
+
+## Parameters check
+
+#### Parameter plot
+
+```{r Parameter plot check}
+flood.counts <- EMDAT.UK.FLOOD %>%
+  count(Start.Year, name = "floods") 
+
+PoissonHist <- ggplot(flood.counts, aes(x = floods)) +
+  geom_histogram(binwidth = 0.5, fill = "lightblue", color = "black") +
+  labs(title = "Histogram of UK Annual Flood Events", 
+       x = "Floods per Year", y = "Count") +
+  theme_minimal()
+
+flood.damages <- sort(simp.EMDAT.UK.FLOOD$Total.Damage.Adj, decreasing = FALSE) * 0.0001
+
+GPDLOSS <- data.frame(
+  Index = 1:length(flood.damages),
+  Loss = sort(flood.damages)
+)
+
+q75 <- quantile(flood.damages, 0.75)
+
+GPDLOSSplot <- ggplot(GPDLOSS, aes(x = Index, y = Loss)) +
+  geom_line() +
+  geom_hline(yintercept = q75, color = "indianred", linetype = "dashed") + 
+  annotate("text", x = length(flood.damages)*0.3, y = q75, 
+           label = "75% threshold (GPD)", vjust = -1, color = "indianred", size = 3) + 
+  labs(title = "Flood Losses (sorted)",
+       x = "Index",
+       y = "Loss (£ millions)") +
+  theme_minimal()
+
+PoissonHist + GPDLOSSplot + plot_layout(ncol = 2)
+```
+
+### Poisson
+
+```{r Poisson check: chi-sq test}
+event.range <- 0:max(flood.counts$floods)
+obs.full <- table(factor(flood.counts$floods, levels = event.range))
+exp.counts <- dpois(event.range, lambda = mean(flood.counts$floods)) * sum(obs.full)
+
+pois.test.tb <- data.frame(
+  Events   = event.range,
+  Observed = as.numeric(obs.full),
+  Expected = exp.counts
+) 
+
+X2 <- sum((obs.full - exp.counts)^2 / exp.counts)
+df <- length(event.range) - 1 - 1 
+pval.pois <- pchisq(X2, df = df, lower.tail = FALSE) 
+pval.pois
+```
+
+### GPD
+
+#### Threshold choice
+
+##### 75th
+
+```{r GPD parameter check: 75th} 
+flood.damages <- sort(simp.EMDAT.UK.FLOOD$Total.Damage.Adj, decreasing = FALSE)
+mean(flood.damages)
+max(flood.damages)
+
+u75 <- quantile(flood.damages, 0.75)
+FLOOD.GPD75 <- fpot(flood.damages, threshold = u75, model = "gpd")
+
+scale75 <- FLOOD.GPD75$estimate[1]  
+shape75 <- FLOOD.GPD75$estimate[2]  
+threshold75 <- FLOOD.GPD75$threshold 
+print(list(scale75, shape75, threshold75)) 
+```
+
+##### 74th 
+
+```{r GPD parameter check: 74th, fig.width=8, fig.height=6} 
+u74 <- quantile(flood.damages, 0.74)
+FLOOD.GPD74 <- fpot(flood.damages, threshold = u74, model = "gpd")
+summary(FLOOD.GPD74)
+scale74 <- FLOOD.GPD74$estimate[1]   
+shape74 <- FLOOD.GPD74$estimate[2]   
+threshold74 <- FLOOD.GPD74$threshold 
+print(list(scale74, shape74, threshold74))
+
+par(mfrow = c(2, 2))
+plot(FLOOD.GPD75)
+plot(FLOOD.GPD74)
+par(mfrow = c(1, 1)) 
+```
+
+##### Goodness-of-Fit Tests
+
+###### Kolmogorov-Smirnov test
+
+```{r GPD threshold check: Goodness-of-Fit Tests}
+exceedances75 <- flood.damages[flood.damages > u75] - u75
+exceedances74 <- flood.damages[flood.damages > u74] - u74
+ks.test(exceedances75, "pgpd", loc = 0, scale = scale75, shape = shape75)  
+ks.test(exceedances74, "pgpd", loc = 0, scale = scale74, shape = shape74)  
+```
+
+###### Anderson-Darling
+
+```{r GPD distribution check: Anderson-Darling Test}
+gpdAd(exceedances74, bootstrap = TRUE, bootnum = 100, allowParallel = TRUE)
+gpdAd(exceedances75, bootstrap = TRUE, bootnum = 100, allowParallel = TRUE)
+```
+
+##### AIC
+
+```{r GPD threshold check: AIC}
+loglik75 <- sum(log(dgpd(exceedances75, loc = 0, scale = scale75, shape = shape75)))
+loglik74 <- sum(log(dgpd(exceedances74, loc = 0, scale = scale74, shape = shape74)))
+
+k <- 2
+
+AIC75 <- 2 * k - 2 * loglik75
+AIC74 <- 2 * k - 2 * loglik74
+c(AIC75, AIC74)
+```
+
+## Model fitting and example run
+
+```{r SSP scenario parameters for example runs}
+lambda.SSP1 <- 1.0
+lambda.SSP3 <- 2.0
+regional.exposure <- c(England = 0.55, Scotland = 0.15, Wales = 0.15, Northern_Ireland = 0.15)
+years <- 2025:2035
+sim.n <- 1000
+```
+
+### Event frequency 
+
+```{r project Poisson event frequency across region, fig.width=8, fig.height=6} 
+Poi.freq.sim.fun <- function(lambda, exposure, years, sim.n) {
+  regions <- names(exposure)
+  
+  results <- purrr::map_dfr(regions, function(region) {
+    sim_matrix <- replicate(sim.n, {
+      annual_events <- rpois(length(years), lambda) 
+    }) 
+    tibble(
+      Region = region,
+      Year = years,
+      Counts = rowMeans(sim_matrix)
+    )
+  }) 
+  return(results)
+}
+
+Poi75 <- bind_rows(
+  Poi.freq.sim.fun(lambda = lambda.SSP1, exposure = regional.exposure, years = years, sim.n = sim.n) %>%
+    mutate(Scenario = "SSP1"),
+  Poi.freq.sim.fun(lambda = lambda.SSP3, exposure = regional.exposure, years = years, sim.n = sim.n) %>%
+    mutate(Scenario = "SSP3")
+)
+
+Poi75$Region <- factor(Poi75$Region, levels = c("England", "Scotland", "Wales", "Northern_Ireland"))
+
+ggplot(Poi75, aes(x = Year, y = Counts, color = Region)) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ Scenario) +
+  labs(
+    title = "Simulated UK Regional Flood Occurence (with fitted Poisson)",
+    y = "Average Number of Events", x = "Year"
+  ) +
+  theme_minimal()
+```
+
+```{r Poisson projection with confidence interval} 
+Poi.seq.sim.quantiles <- function(lambda, exposure, years, sim.n) {
+  regions <- names(exposure)
+  results <- purrr::map_dfr(regions, function(region) {
+    sim_matrix <- replicate(sim.n, {
+      annual_events <- rpois(length(years), lambda) 
+    })
+    tibble(
+      Region = region,
+      Year = rep(years, each = 1),
+      Mean = rowMeans(sim_matrix),
+      P5   = apply(sim_matrix, 1, quantile, probs = 0.05),
+      P95  = apply(sim_matrix, 1, quantile, probs = 0.95)
+    )
+  })
+  return(results)
+}
+ 
+Poi75.quant <- bind_rows(
+  Poi.seq.sim.quantiles(lambda = lambda.SSP1, exposure = regional.exposure, years = years, sim.n = sim.n) %>%
+    mutate(Scenario = "SSP1"),
+  Poi.seq.sim.quantiles(lambda = lambda.SSP3, exposure = regional.exposure, years = years, sim.n = sim.n) %>%
+    mutate(Scenario = "SSP3")
+) 
+```
+
+### Event severity
+
+```{r project GPD event severity across region, fig.width=8, fig.height=6} 
+GPD.loss.sim.fun <- function(lambda, shape, scale, threshold, exposure, years, sim.n) {
+  regions <- names(exposure)
+  
+  results <- purrr::map_dfr(regions, function(region) {
+    sim_matrix <- replicate(sim.n, {
+      annual_events <- rpois(length(years), lambda)
+      sapply(annual_events, function(n) {
+        if (n == 0) return(0)
+        exceed <- rgpd(n, loc = 0, scale = scale, shape = shape)
+        total <- sum(threshold + exceed)
+        return(total * exposure[[region]])  
+      })
+    })
+    
+    tibble(
+      Region = region,
+      Year = years,
+      Losses = rowMeans(sim_matrix)
+    )
+  })
+  
+  return(results)
+}
+
+GPD75 <- bind_rows(
+  GPD.loss.sim.fun(lambda = lambda.SSP1, shape = shape75, scale = scale75, threshold = threshold75,
+                      exposure = regional.exposure, years = years, sim.n = sim.n) %>%
+    mutate(Scenario = "SSP1"),
+  GPD.loss.sim.fun(lambda = lambda.SSP3, shape = shape75, scale = scale75, threshold = threshold75,
+                      exposure = regional.exposure, years = years, sim.n = sim.n) %>%
+    mutate(Scenario = "SSP3")
+)
+
+GPD75$Region <- factor(GPD75$Region, levels = c("England", "Scotland", "Wales", "Northern_Ireland"))
+
+ggplot(GPD75, aes(x = Year, y = Losses, color = Region)) +
+  geom_line(size = 1.2) +
+  facet_wrap(~ Scenario) +
+  labs(
+    title = "Simulated UK Regional Flood Losses (with Fitted GPD)",
+    y = "Average Loss (£ millions)", x = "Year"
+  ) +
+  theme_minimal()
+```
+
+```{r GPD projection with confidence interval} 
+GPD.loss.sim.quantiles <- function(lambda, shape, scale, threshold, exposure, years, sim.n) {
+  regions <- names(exposure)
+  
+  results <- purrr::map_dfr(regions, function(region) {
+    sim_matrix <- replicate(sim.n, {
+      annual_events <- rpois(length(years), lambda)
+      sapply(annual_events, function(n) {
+        if (n == 0) return(0)
+        exceed <- rgpd(n, loc = 0, scale = scale, shape = shape)
+        total <- sum(threshold + exceed)
+        return(total * exposure[[region]])
+      })
+    })
+
+    tibble(
+      Region = region,
+      Year = rep(years, each = 1),
+      Mean = rowMeans(sim_matrix),
+      P5   = apply(sim_matrix, 1, quantile, probs = 0.05),
+      P95  = apply(sim_matrix, 1, quantile, probs = 0.95)
+    )
+  })
+
+  return(results)
+}
+ 
+GPD75.quant <- bind_rows(
+  GPD.loss.sim.quantiles(lambda = lambda.SSP1, shape = shape75, scale = scale75, threshold = threshold75,
+                         exposure = regional.exposure, years = years, sim.n = sim.n) %>%
+    mutate(Scenario = "SSP1"),
+  GPD.loss.sim.quantiles(lambda = lambda.SSP3, shape = shape75, scale = scale75, threshold = threshold75,
+                         exposure = regional.exposure, years = years, sim.n = sim.n) %>%
+    mutate(Scenario = "SSP3")
+) 
+```
+
+```{r Stack plot by region, message = FALSE, fig.width=8, fig.height=6}
+his.sector.weights <- FAME.FLOOD.detail %>% 
+  count(Region, Activities) %>%
+  group_by(Region) %>%
+  dplyr::mutate(Share = n / sum(n)) 
+ 
+GPD75.loss.by.industry <- GPD75.quant %>%
+  dplyr::mutate(Region = gsub("_", " ", Region),
+                Region = trimws(Region)) %>%
+  left_join(his.sector.weights, by = "Region") %>%
+  dplyr::mutate(Sector_Loss = Mean * Share) %>%
+  rename(Sector = Activities) 
+
+ggplot(GPD75.loss.by.industry, aes(x = Year, y = Sector_Loss, fill = Sector)) +
+  geom_area() +
+  facet_grid(Region ~ Scenario) +
+  scale_fill_manual(values=c("salmon", "dodgerblue2", "darkseagreen3")) +
+  labs(
+    title = "Simulated Flood Loss Breakdown by Sector (Advanced Manufacturing)",
+    x = "Year",
+    y = "Sector Loss (£ millions)",
+    fill = "Sector"
+  ) +
+  theme_minimal()
+```
+
+## Simulation construction
+
+### Step 0: clean up
+
+#### Retrieve empirical distribution
+
+```{r Monte Carlo 0: count distribution} 
+UK.FLOOD.distribution <- UK.FLOOD.complete %>%
+  dplyr::mutate(
+    DupRegion = str_split(UK.country, "; "),               
+    UniqueRegion = lapply(DupRegion, function(x) unique(trimws(x))),  
+    n_regions = sapply(UniqueRegion, length)   
+  ) %>%
+  count(n_regions) %>%
+  dplyr::mutate(prob = n / sum(n)) 
+
+UK.FLOOD.distribution <- UK.FLOOD.distribution %>%
+  mutate(prob = prob * (1 - 0.001)) %>%   
+  bind_rows(tibble(n_regions = 4, prob = 0.001)) %>%
+  dplyr::mutate(prob = round(prob, 3)) %>%
+  arrange(n_regions)
+
+```
+
+#### Interpolating missing years
+
+```{r Monte Carlo 0: interpolation}
+interpolate_ssp1 <- function(data) {
+  df_long <- data %>%
+    slice(1) %>%  
+    pivot_longer(cols = c(2:4), names_to = "Year", values_to = "Value") %>%
+    dplyr::mutate(
+      Year = as.integer(Year),
+      Value = as.numeric(Value)
+    ) %>%
+    dplyr::select(Year, Value)
+
+  interp_years <- tibble(Year = 2025:2035)
+
+  interpolated <- interp_years %>%
+    left_join(df_long, by = "Year") %>%
+    arrange(Year) %>%
+    dplyr::mutate(Value = zoo::na.approx(Value, Year, rule = 2))
+
+  return(interpolated)
+}
+
+interpolate_ssp3 <- function(data) {
+  df_long <- data %>%
+    slice_tail(n=1) %>%  
+    pivot_longer(cols = c(2:4), names_to = "Year", values_to = "Value") %>%
+    dplyr::mutate(
+      Year = as.integer(Year),
+      Value = as.numeric(Value)
+    ) %>%
+    dplyr::select(Year, Value)
+
+  interp_years <- tibble(Year = 2025:2035)
+
+  interpolated <- interp_years %>%
+    left_join(df_long, by = "Year") %>%
+    arrange(Year) %>%
+    dplyr::mutate(Value = zoo::na.approx(Value, Year, rule = 2))
+
+  return(interpolated)
+}
+```
+
+#### Scenario parameters
+
+```{r SSP scenario parameters for full simulation}
+lambda.SSP1 <- 1.0
+lambda.SSP3 <- 2.0 
+
+fixed.death <- floor(mean(simp.EMDAT.UK.FLOOD$Total.Deaths))
+fixed.affected <- floor(mean(simp.EMDAT.UK.FLOOD$Total.Affected))
+
+SSP_GDP_interp1 <- interpolate_ssp1(SSP_GDP)
+SSP_POP_interp1 <- interpolate_ssp1(SSP_POP)
+
+SSP_GDP_interp3 <- interpolate_ssp3(SSP_GDP)
+SSP_POP_interp3 <- interpolate_ssp3(SSP_POP)
+
+POP17.share <- POP17.share
+GDP17.share <- GDP17.share  
+
+runs <- 500
+```
+
+### Step 1: Simulate events and composite
+
+```{r Monte Carlo 1: Simulate events and composite} 
+
+simulate_event_composites_fun <- function(runs, years, lambda, GPD_model,
+                                          fixed_deaths, fixed_affected,
+                                          gdp_proj, pop_proj,
+                                          gdp_share, pop_share, 
+                                          scenario_label) {
+  
+  scale <- GPD_model$estimate[1]
+  shape <- GPD_model$estimate[2]
+  threshold <- GPD_model$threshold
+  
+  regions <- c("England", "Scotland", "Wales", "Northern Ireland")
+  simulation_results <- vector("list", length(years))
+  names(simulation_results) <- years 
+
+  for (year in years) {
+    
+    GDP_UK <- gdp_proj %>% filter(Year == year) %>% pull(Value)
+    POP_UK <- pop_proj %>% filter(Year == year) %>% pull(Value)
+    
+    GDP_reg <- GDP_UK * as.numeric(gdp_share)
+    POP_reg <- POP_UK * as.numeric(pop_share)
+    names(GDP_reg) <- regions
+    names(POP_reg) <- regions
+    
+    n_events <- rpois(n = 1, lambda = lambda)
+    
+    if (n_events == 0) {
+      composite_year <- tibble(
+        Year = year,
+        Region = regions,
+        Composite = 0
+      )
+    } else {
+      event_df <- purrr::map_dfr(1:n_events, function(eid) {
+              affected_regions <- sample(regions,
+                                         size = sample(1:4, size = 1, 
+                                                       prob = UK.FLOOD.distribution$prob),
+                                         replace = FALSE)
+            
+              D_e <- fixed_deaths
+              A_e <- fixed_affected
+              exceedance <- rgpd(1, loc = 0, scale = scale, shape = shape)
+              M_e <- threshold + exceedance
+              
+              purrr::map_dfr(affected_regions, function(r) {
+                tibble(
+                  Region = r,
+                  Composite_e = 0.25 * (D_e / POP_reg[[r]]) +
+                                0.25 * (A_e / POP_reg[[r]]) +
+                                0.25 * (M_e / GDP_reg[[r]]) +
+                                0.25,
+                  Event = paste0("Y", year, "_E", eid),
+                  Year = year
+                )
+              })
+            })
+      
+      composite_year <- event_df %>%
+        group_by(Year, Region) %>%
+        summarise(Composite = sum(Composite_e), .groups = "drop")
+    }
+    
+    simulation_results[[as.character(year)]] <- composite_year
+  }
+
+  bind_rows(simulation_results) %>%
+    mutate(Scenario = scenario_label)
+}
+
+sim.SSPs <- purrr::map_dfr(1:runs, function(sid) {
+  bind_rows(
+    simulate_event_composites_fun(
+      runs = 1,
+      years = 2025:2035,
+      lambda = lambda.SSP1,
+      GPD_model = FLOOD.GPD75,
+      fixed_deaths = fixed.death,
+      fixed_affected = fixed.affected,
+      gdp_proj = SSP_GDP_interp1,
+      pop_proj = SSP_POP_interp1,
+      gdp_share = GDP17.share,
+      pop_share = POP17.share,
+      scenario_label = "SSP1"
+    ),
+    simulate_event_composites_fun(
+      runs = 1,
+      years = 2025:2035,
+      lambda = lambda.SSP3,
+      GPD_model = FLOOD.GPD75,
+      fixed_deaths = fixed.death,
+      fixed_affected = fixed.affected,
+      gdp_proj = SSP_GDP_interp3,
+      pop_proj = SSP_POP_interp3,
+      gdp_share = GDP17.share,
+      pop_share = POP17.share,
+      scenario_label = "SSP3"
+    )
+  ) %>%
+    mutate(Simulation = sid)
+}) 
+```
+
+### Step 2: Assign Upstream and Downstream labels
+
+```{r Monte Carlo 2: Assign U & D} 
+Company.sim.grid <- crossing(
+  FAME.FLOOD.detail %>% 
+    dplyr::select(Company.name, Region, Activities) %>% 
+    distinct(),
+  Year = 2025:2035,
+  Simulation = 1:runs,
+  Scenario = c("SSP1", "SSP3")
+)
+
+Future.company.FLOOD.detail <- Company.sim.grid %>% 
+  left_join(sim.SSPs %>% dplyr::select(Region, Year, Simulation, Scenario, Composite), 
+            by = c("Region", "Year", "Simulation", "Scenario")) %>%
+  mutate(
+    Composite = replace_na(Composite, 0), 
+    U = if_else(Activities == "Upstream", Composite, 0), 
+    D = if_else(Activities == "Downstream", Composite, 0)
+  ) 
+``` 
+
+### Step 3: Retrieve parameters from QR formula
+
+```{r Monte Carlo 3 Detect parameters}
+EBITDA.coef.list <- all.EBITDA.coefs %>%
+  filter(p_value < 0.05) %>%
+  dplyr::select(tau, term, estimate) 
+
+EBITDA.coef.list <- EBITDA.coef.list %>%
+  pivot_wider(names_from = term, values_from = estimate) %>%
+  split(.$tau)
+
+TAT.coef.list <- all.TAT.coefs %>%
+  filter(p_value < 0.05) %>%
+  dplyr::select(tau, term, estimate) 
+
+TAT.coef.list <- TAT.coef.list %>%
+  pivot_wider(names_from = term, values_from = estimate) %>%
+  split(.$tau)
+```
+
+### Step 4: Making forecast
+
+```{r Monte Carlo 4 Forecast based on coef}
+MC.forecast.fun <- function(data, coef_vec) {
+  terms <- names(coef_vec)
+  pred_vals <- numeric(nrow(data))
+
+  add_if_valid <- function(term, value) {
+    if (term %in% terms && !is.na(coef_vec[term])) {
+      pred_vals <<- pred_vals + coef_vec[term] * value
+    }
+  }
+
+  add_if_valid("(Intercept)", 1)
+  add_if_valid("U", data$U)
+  add_if_valid("D", data$D)
+  add_if_valid("RegionNorthern Ireland", data$Region == "Northern Ireland")
+  add_if_valid("RegionScotland", data$Region == "Scotland")
+  add_if_valid("RegionWales", data$Region == "Wales")
+  add_if_valid("U:RegionNorthern Ireland", ifelse(data$Region == "Northern Ireland", data$U, 0))
+  add_if_valid("U:RegionScotland", ifelse(data$Region == "Scotland", data$U, 0))
+  add_if_valid("U:RegionWales", ifelse(data$Region == "Wales", data$U, 0))
+  add_if_valid("RegionNorthern Ireland:D", ifelse(data$Region == "Northern Ireland", data$D, 0))
+  add_if_valid("RegionScotland:D", ifelse(data$Region == "Scotland", data$D, 0))
+  add_if_valid("RegionWales:D", ifelse(data$Region == "Wales", data$D, 0))
+
+  data$pred_values <- pred_vals
+  return(data)
+}
+```
+
+```{r EBITDA forecast}
+EBITDA.margin.MC.forecast.results <- purrr::map_dfr(
+  names(EBITDA.coef.list),
+  function(tau_val) {
+    coef_row <- EBITDA.coef.list[[tau_val]]
+    coef_vec <- as.numeric(coef_row[1, -which(names(coef_row) == "tau")])
+    names(coef_vec) <- names(coef_row)[-which(names(coef_row) == "tau")]
+
+    MC.forecast.fun(Future.company.FLOOD.detail, coef_vec) %>%
+      dplyr::mutate(tau = as.numeric(tau_val))
+  }
+) 
+```
+
+```{r TAT forecast}
+TAT.MC.forecast.results <- purrr::map_dfr(
+  names(TAT.coef.list),
+  function(tau_val) {
+    coef_row <- TAT.coef.list[[tau_val]]
+    coef_vec <- as.numeric(coef_row[1, -which(names(coef_row) == "tau")])
+    names(coef_vec) <- names(coef_row)[-which(names(coef_row) == "tau")]
+
+    MC.forecast.fun(Future.company.FLOOD.detail, coef_vec) %>%
+      dplyr::mutate(tau = as.numeric(tau_val))
+  }
+) 
+```
+
+### Step 5: Visualisation of results
+
+```{r EBITDA projection visual 1, fig.width=16, fig.height=6} 
+# Boxplot by tau and Region
+
+EBITDA.region.box.1 <- EBITDA.margin.MC.forecast.results %>%
+  filter(Scenario == "SSP1") %>%
+  ggplot(aes(x = Region, y = pred_values, fill = factor(tau))) +
+  geom_boxplot(outlier.size = 0.2, position = position_dodge(0.75)) +
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Predicted EBITDA Margin\nby Region and Quantile under SSP1",
+       x = "Region", y = "Predicted EBITDA Margin (%)",
+       fill = "Quantile (τ)") +
+  theme_minimal()
+
+EBITDA.region.box.3 <- EBITDA.margin.MC.forecast.results %>%
+  filter(Scenario == "SSP3") %>%
+  ggplot(aes(x = Region, y = pred_values, fill = factor(tau))) +
+  geom_boxplot(outlier.size = 0.2, position = position_dodge(0.75)) + 
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Predicted EBITDA Margin\nby Region and Quantile under SSP3",
+       x = "Region", y = "Predicted EBITDA Margin (%)",
+       fill = "Quantile (τ)") +
+  theme_minimal()
+ 
+EBITDA.region.box.1 + EBITDA.region.box.3 + plot_layout(ncol = 2)
+```
+
+```{r EBITDA projection visual 2, fig.width=8, fig.height=4} 
+# Boxplot by Scenario, faceted by tau
+
+ggplot(EBITDA.margin.MC.forecast.results,
+       aes(x = Scenario, y = pred_values, fill = Scenario)) +
+  geom_boxplot(outlier.size = 0.2) +
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_bmj() +
+  labs(title = "Predicted EBITDA Margin by Climate Scenario",
+       x = "Scenario", y = "Predicted EBITDA Margin (%)") +
+  facet_wrap(~ tau, labeller = label_both) +
+  theme_minimal()
+```
+
+```{r EBITDA projection visual 3, fig.width=16, fig.height=6} 
+# Boxplot by Activities and tau, grouped by Region
+
+EBITDA.act.box.1 <- EBITDA.margin.MC.forecast.results %>%
+  filter(Scenario == "SSP1") %>%
+  ggplot(aes(x = Activities, y = pred_values, fill = factor(tau))) +
+  geom_boxplot(outlier.size = 0.2, position = position_dodge(0.75)) +
+  facet_wrap(~ Region, labeller = label_both) +
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Predicted EBITDA Margin by Industry (Activities),\nRegion and Quantile under SSP1",
+    x = "Industry Activities (Supply Chain Role)", y = "Predicted EBITDA Margin (%)",
+    fill = "Quantile (τ)"
+  ) +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+EBITDA.act.box.3 <-EBITDA.margin.MC.forecast.results %>%
+  filter(Scenario == "SSP3") %>%
+  ggplot(aes(x = Activities, y = pred_values, fill = factor(tau))) +
+  geom_boxplot(outlier.size = 0.2, position = position_dodge(0.75)) +
+  facet_wrap(~ Region, labeller = label_both) +
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Predicted EBITDA Margin by Industry (Activities),\nRegion and Quantile under SSP3",
+    x = "Industry Activities (Supply Chain Role)", y = "Predicted EBITDA Margin (%)",
+    fill = "Quantile (τ)"
+  ) +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+EBITDA.act.box.1 + EBITDA.act.box.3 + plot_layout(ncol = 2)
+
+```
+
+```{r EBITDA historical and forecast, fig.width=14, fig.height=6}
+EBITDA.forecast.plot.data1 <- EBITDA.margin.MC.forecast.results %>%
+  filter(Scenario == "SSP1") %>%
+  group_by(Year, Activities, Scenario, tau) %>%
+  summarise(mean_value = mean(pred_values, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(Source = "Forecast") %>%
+  dplyr::mutate(
+    tau = as.numeric(tau),
+    Source = "Forecast"
+  )
+
+EBITDA.forecast.plot.data3 <- EBITDA.margin.MC.forecast.results %>%
+  filter(Scenario == "SSP3") %>%
+  group_by(Year, Activities, Scenario, tau) %>%
+  summarise(mean_value = mean(pred_values, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(Source = "Forecast") %>%
+  dplyr::mutate(
+    tau = as.numeric(tau),
+    Source = "Forecast"
+  )
+
+EBITDA.historical.plot.data <- FAME.FLOOD.detail %>%
+  filter(!is.na(EBITDA.Margin)) %>%
+  dplyr::mutate(Year = as.integer(as.character(Year))) %>%
+  group_by(Year, Activities) %>%
+  summarise(
+    `0.25` = quantile(EBITDA.Margin, probs = 0.25),
+    `0.5` = quantile(EBITDA.Margin, probs = 0.5),
+    `0.75` = quantile(EBITDA.Margin, probs = 0.75),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(`0.25`, `0.5`, `0.75`),
+               names_to = "tau",
+               values_to = "mean_value") %>%
+  dplyr::mutate(
+    tau = as.numeric(tau),
+    Scenario = "Historical",
+    Source = "Historical"
+  ) 
+
+
+EBITDA.plot.combined1 <- bind_rows(EBITDA.forecast.plot.data1, EBITDA.historical.plot.data)
+EBITDA.plot.combined3 <- bind_rows(EBITDA.forecast.plot.data3, EBITDA.historical.plot.data)
+
+
+EBITDA.comb.1 <- ggplot(EBITDA.plot.combined1, aes(x = Year, y = mean_value,
+                          color = Activities,
+                          linetype = Source)) +
+  geom_line(size = 1) +
+  facet_wrap(~ tau, labeller = label_both, nrow = 1) + 
+  scale_x_continuous(breaks = seq(2010, 2035, 5)) +
+  scale_linetype_manual(values = c("Forecast" = "solid", "Historical" = "dashed")) +
+  scale_color_manual(values=c("salmon", "dodgerblue2", "darkseagreen3")) +
+  labs(
+    title = "Historical vs Forecasted EBITDA Margin\nby Industry and Quantile under SSP1",
+    x = "Year", y = "EBITDA Margin (%)",
+    color = "Industry", linetype = "Data Source"
+  ) +
+  geom_vline(xintercept = 2025, linetype = "dotted", color = "black") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+EBITDA.comb.3 <- ggplot(EBITDA.plot.combined3, aes(x = Year, y = mean_value,
+                          color = Activities,
+                          linetype = Source)) +
+  geom_line(size = 1) +
+  facet_wrap(~ tau, labeller = label_both, nrow = 1) + 
+  scale_x_continuous(breaks = seq(2010, 2035, 5)) +
+  scale_linetype_manual(values = c("Forecast" = "solid", "Historical" = "dashed")) +
+  scale_color_manual(values=c("salmon", "dodgerblue2", "darkseagreen3")) +
+  labs(
+    title = "Historical vs Forecasted EBITDA Margin\nby Industry and Quantile under SSP3",
+    x = "Year", y = "EBITDA Margin (%)",
+    color = "Industry", linetype = "Data Source"
+  ) +
+  geom_vline(xintercept = 2025, linetype = "dotted", color = "black") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+EBITDA.comb.1 + EBITDA.comb.3 + plot_layout(ncol = 2)
+
+```
+
+```{r TAT projection visual 1, fig.width=16, fig.height=6} 
+# Boxplot by tau and Region
+
+TAT.region.box.1 <- TAT.MC.forecast.results %>%
+  filter(Scenario == "SSP1") %>%
+  ggplot(aes(x = Region, y = pred_values, fill = factor(tau))) +
+  geom_boxplot(outlier.size = 0.2, position = position_dodge(0.75)) +
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Predicted TAT\nby Region and Quantile under SSP1",
+       x = "Region", y = "Predicted TAT (%)",
+       fill = "Quantile (τ)") +
+  theme_minimal()
+
+TAT.region.box.3 <- TAT.MC.forecast.results %>%
+  filter(Scenario == "SSP3") %>%
+  ggplot(aes(x = Region, y = pred_values, fill = factor(tau))) +
+  geom_boxplot(outlier.size = 0.2, position = position_dodge(0.75)) + 
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "Predicted TAT\nby Region and Quantile under SSP3",
+       x = "Region", y = "Predicted TAT (%)",
+       fill = "Quantile (τ)") +
+  theme_minimal()
+ 
+ 
+TAT.region.box.1 + TAT.region.box.3 + plot_layout(ncol = 2)
+```
+
+```{r TAT projection visual 2, fig.width=8, fig.height=4} 
+# Boxplot by Scenario, faceted by tau
+
+ggplot(TAT.MC.forecast.results,
+       aes(x = Scenario, y = pred_values, fill = Scenario)) +
+  geom_boxplot(outlier.size = 0.2) +
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_bmj() +
+  labs(title = "Predicted TAT by Climate Scenario",
+       x = "Scenario", y = "Predicted TAT  (%)") +
+  facet_wrap(~ tau, labeller = label_both) +
+  theme_minimal()
+
+# Boxplot by Activities and tau, grouped by Region
+
+```
+
+```{r TAT projection visual 3, fig.width=16, fig.height=6} 
+TAT.act.box.1 <- TAT.MC.forecast.results %>%
+  filter(Scenario == "SSP1") %>%
+  ggplot(aes(x = Activities, y = pred_values, fill = factor(tau))) +
+  geom_boxplot(outlier.size = 0.2, position = position_dodge(0.75)) +
+  facet_wrap(~ Region, labeller = label_both) +
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Predicted TAT by Industry (Activities),\nRegion and Quantile under SSP1",
+    x = "Industry Activities (Supply Chain Role)", y = "Predicted TAT (%)",
+    fill = "Quantile (τ)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+TAT.act.box.3 <-TAT.MC.forecast.results %>%
+  filter(Scenario == "SSP3") %>%
+  ggplot(aes(x = Activities, y = pred_values, fill = factor(tau))) +
+  geom_boxplot(outlier.size = 0.2, position = position_dodge(0.75)) +
+  facet_wrap(~ Region, labeller = label_both) +
+  scale_y_continuous(limits = c(-5, 20)) + 
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title = "Predicted TAT by Industry (Activities),\nRegion and Quantile under SSP3",
+    x = "Industry Activities (Supply Chain Role)", y = "Predicted TAT (%)",
+    fill = "Quantile (τ)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+TAT.act.box.1 + TAT.act.box.3 + plot_layout(ncol = 2)
+```
+
+```{r TAT historical and forecast, fig.width=14, fig.height=6}
+# Trend over time by Year, Scenario, and Activities
+TAT.forecast.plot.data1 <- TAT.MC.forecast.results %>%
+  filter(Scenario == "SSP1") %>%
+  group_by(Year, Activities, Scenario, tau) %>%
+  summarise(mean_value = mean(pred_values, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(Source = "Forecast") %>%
+  dplyr::mutate(
+    tau = as.numeric(tau),
+    Source = "Forecast"
+  )
+
+TAT.forecast.plot.data3 <- TAT.MC.forecast.results %>%
+  filter(Scenario == "SSP3") %>%
+  group_by(Year, Activities, Scenario, tau) %>%
+  summarise(mean_value = mean(pred_values, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(Source = "Forecast") %>%
+  dplyr::mutate(
+    tau = as.numeric(tau),
+    Source = "Forecast"
+  )
+
+TAT.historical.plot.data <- FAME.FLOOD.detail %>%
+  filter(!is.na(TAT)) %>%
+  dplyr::mutate(Year = as.integer(as.character(Year))) %>%
+  group_by(Year, Activities) %>%
+  summarise(
+    `0.25` = quantile(TAT, probs = 0.25),
+    `0.5` = quantile(TAT, probs = 0.5),
+    `0.75` = quantile(TAT, probs = 0.75),
+    .groups = "drop"
+  ) %>%
+  pivot_longer(cols = c(`0.25`, `0.5`, `0.75`),
+               names_to = "tau",
+               values_to = "mean_value") %>%
+  dplyr::mutate(
+    tau = as.numeric(tau),
+    Scenario = "Historical",
+    Source = "Historical"
+  ) 
+
+
+TAT.plot.combined1 <- bind_rows(TAT.forecast.plot.data1, TAT.historical.plot.data)
+TAT.plot.combined3 <- bind_rows(TAT.forecast.plot.data3, TAT.historical.plot.data)
+
+
+TAT.comb.1 <- ggplot(TAT.plot.combined1, aes(x = Year, y = mean_value,
+                          color = Activities,
+                          linetype = Source)) +
+  geom_line(size = 1) +
+  facet_wrap(~ tau, labeller = label_both, nrow = 1) + 
+  scale_x_continuous(breaks = seq(2010, 2035, 5)) +
+  scale_y_continuous(limits = c(0, 18)) + 
+  scale_linetype_manual(values = c("Forecast" = "solid", "Historical" = "dashed")) +
+  scale_color_manual(values=c("salmon", "dodgerblue2", "darkseagreen3")) +
+  labs(
+    title = "Historical vs Forecasted TAT\nby Industry and Quantile under SSP1",
+    x = "Year", y = "TAT (%)",
+    color = "Industry", linetype = "Data Source"
+  ) +
+  geom_vline(xintercept = 2025, linetype = "dotted", color = "black") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+TAT.comb.3 <- ggplot(TAT.plot.combined3, aes(x = Year, y = mean_value,
+                          color = Activities,
+                          linetype = Source)) +
+  geom_line(size = 1) +
+  facet_wrap(~ tau, labeller = label_both, nrow = 1) + 
+  scale_x_continuous(breaks = seq(2010, 2035, 5)) +
+  scale_y_continuous(limits = c(0, 18)) + 
+  scale_linetype_manual(values = c("Forecast" = "solid", "Historical" = "dashed")) +
+  scale_color_manual(values=c("salmon", "dodgerblue2", "darkseagreen3")) +
+  labs(
+    title = "Historical vs Forecasted TAT\nby Industry and Quantile under SSP3",
+    x = "Year", y = "TAT (%)",
+    color = "Industry", linetype = "Data Source"
+  ) +
+  geom_vline(xintercept = 2025, linetype = "dotted", color = "black") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+
+TAT.comb.1 + TAT.comb.3 + plot_layout(ncol = 2)
+```

@@ -1,0 +1,957 @@
+---
+title: "Dissertation_R_codes_2"
+author: "Yvonne Zhang"
+output: html_document
+date: "2025-07-31"
+---
+
+```{r library package loading}
+library(kableExtra)
+library(knitr)
+library(moments)
+library(dplyr)
+library(ggplot2)
+library(zoo)
+library(lubridate)
+library(tseries)
+library(forecast)
+library(stats)
+library(ggsci)
+library(gridExtra)
+library(rugarch)
+library(xts)
+library(patchwork)
+library(keras)
+library(tensorflow)
+library(forecast)
+set.seed(111)
+Sys.setenv(CUDA_VISIBLE_DEVICES = "-1") # CPU only for simplicity
+```
+
+```{r Dataset loading}
+# Build the correct path to files stored in your local "data" folder
+data.path <- function(filename) {
+  file.path("data", filename)
+}
+
+GB <- read.csv(data.path("green_bond_prices.csv")) 
+```
+
+## Data clean: Monthly and Quarterly data aggregation
+```{r Data clean: Monthly and Quarterly data aggregation}
+GB <- GB[order(GB$Issue.Date), ]
+
+GB$Issue.Date <- as.Date(GB$Issue.Date)
+GB$YearMonth <- format(GB$Issue.Date, "%Y-%m") 
+monthly.mean <- tapply(GB$Issue.Price, GB$YearMonth, mean)
+
+GB$Quarter <- quarter(GB$Issue.Date) 
+GB$YearQuarter <- paste0(GB$Year, "-Q", GB$Quarter) 
+quarterly.mean <- tapply(GB$Issue.Price, GB$YearQuarter, mean) 
+```
+
+# Exploratory analysis
+
+## Summary statistics
+
+```{r Summary statistics: GB overall} 
+GB.overall.issue.price.summary <- data.frame(
+  Mean = mean(GB$Issue.Price),
+  sd = sd(GB$Issue.Price),
+  Q1 = quantile(GB$Issue.Price, 0.25),
+  Median = quantile(GB$Issue.Price, 0.5),
+  Q3 = quantile(GB$Issue.Price, 0.75),
+  Min = min(GB$Issue.Price),
+  Max = max(GB$Issue.Price),
+  Skewness = skewness(GB$Issue.Price),
+  Kurtosis = kurtosis(GB$Issue.Price)
+)  
+```
+
+```{r Summary statistics: GB annual} 
+annual.counts <- table(GB$Year)
+
+annual.mean.price <- tapply(GB$Issue.Price, GB$Year, mean)
+
+annual.summary <- data.frame(
+  Year = names(annual.counts),
+  Count = as.integer(annual.counts),
+  MeanPrice = as.numeric(annual.mean.price)
+) 
+```
+
+## Exploratory plots
+
+```{r Exploratory plots: annual price summary}
+annual.summary %>%
+  dplyr::mutate(Year = as.integer(Year)) %>%
+  ggplot(aes(x=Year, y=MeanPrice)) +
+  geom_line() +
+  theme_minimal() + 
+  labs(title = "Change in the Mean Price of Green Bonds, 2008-2023 inclusive",
+       x = "Year", y = "Mean Price (% of Par Value)")
+```
+
+```{r Exploratory plots: Hist}
+s.plot1 <- ggplot(GB, aes(x=Issue.Price)) +
+  geom_histogram(bins=50, color="chartreuse4", fill="darkolivegreen3") +
+  theme_minimal() +  
+  labs(title = "Histogram of Issue Prices",
+       x = "Issue Price  (% of Par Value)", y = "Count")
+```
+
+```{r Exploratory plots: Boxplot}
+s.plot2 <- ggplot(GB, aes(x = as.factor(Year), y = Issue.Price)) +
+  geom_boxplot(color="chartreuse4", fill="darkolivegreen3") +
+  theme_minimal() +
+  labs(
+    title = "Yearly Distribution of Issue Prices",
+    x = "Year",
+    y = "Issue Price (% of Par Value)"
+  )
+```
+
+```{r Exploratory plots: Density}
+s.plot3<-ggplot(GB, aes(x = Issue.Price)) +
+  geom_density(fill = "darkolivegreen2", color = "chartreuse4", alpha = 0.5) +
+  geom_vline(xintercept = 100, color = "red", linetype = 2) +
+  theme_minimal() + 
+  labs(
+    title = "Density of Issue Prices",
+    x = "Issue Price (% of Par Value)",
+    y = "Density"
+  ) 
+```
+
+```{r Exploratory plots: ECGB Empirical cumulative distribution function, fig.width = 12, fig.height = 6}
+s.plot4<-ggplot(GB, aes(x = Issue.Price)) +
+  stat_ecdf(geom = "step", color = "chartreuse4") +
+  geom_vline(xintercept = 100, color = "red", linetype = 2) +
+  theme_minimal() + 
+  labs(
+    title = "ECDF of Issue Prices",
+    x = "Issue Price (% of Par Value)",
+    y = "Cumulative Proportion"
+  )
+
+s.plot1 + s.plot2 + s.plot3 + s.plot4 + plot_layout(ncol = 2)
+```
+
+# Pre Time Series Analysis
+
+## Visual check
+
+### Overview of monthly and quarterly series
+
+```{r Time series plots, fig.width = 10, fig.height = 4, message = FALSE}
+monthly.GB <- data.frame(
+  YearMonth = as.yearmon(names(monthly.mean)),
+  MeanPrice  = as.numeric(monthly.mean)
+) 
+
+ts.monthly.plot <- ggplot(monthly.GB, aes(x = YearMonth, y = MeanPrice)) +
+  geom_line(color = "chartreuse4") +  
+  geom_smooth(method = "loess", se = FALSE, color = "red") +  
+  theme_minimal() + 
+  labs(title = "Monthly Average Issue Price",
+       x = "Year-Month", y = "Average Issue Price (% of Par Value)")
+
+quarterly.GB <- data.frame(
+  YearQuarter = as.yearqtr(names(quarterly.mean), format = "%Y-Q%q"), 
+  MeanPrice   = as.numeric(quarterly.mean)
+) 
+
+ts.quarterly.plot <- ggplot(quarterly.GB, aes(x = YearQuarter, y = MeanPrice)) +
+  geom_line(color = "chartreuse4") +
+  geom_smooth(method = "loess", se = FALSE, color = "orange") +
+  theme_minimal() + 
+  labs(title = "Quarterly Average Issue Price",
+       x = "Year-Quarter", y = "Average Issue Price (% of Par Value)") 
+
+ts.monthly.plot + ts.quarterly.plot + plot_layout(ncol = 2)
+```
+
+### STL decomposition
+
+```{r Time Series object}
+ts.monthly <- ts(coredata(monthly.GB$MeanPrice), frequency = 12, start = c(2008, 1)) 
+```
+
+```{r STL Decomposition plot}
+decomp <- stl(ts.monthly, s.window = "periodic") 
+plot(decomp)  
+```
+
+### Stationarity
+
+```{r Stationarity visual check, fig.width = 16, fig.height = 6}
+par(mfrow = c(1, 3))
+plot.ts(ts.monthly, main = "Mean Price Over time")
+acf(ts.monthly, main = "ACF of Mean Price")
+pacf(ts.monthly, main = "PACF of Mean Price")
+par(mfrow = c(1, 1)) 
+```
+
+### Volatility
+
+```{r volatility, message = FALSE}
+roll.sd <- rollapply( 
+           coredata(ts.monthly),
+           width = 12,
+           FUN = sd,
+           fill = NA,
+           align = "right"
+         )
+
+vol.GB <- data.frame(
+           YearMonth = monthly.GB$YearMonth,
+           RollSD    = roll.sd
+         )
+
+ggplot(vol.GB, aes(x = YearMonth, y = RollSD)) +
+  geom_line(color = "chartreuse4") +
+  labs(title = "12-Month Rolling Volatility of Issue Price",
+       x = "Year-Month", y = "Rolling SD")
+```
+
+## Outliers and Anomaly Detection
+
+### Outlier identification
+
+```{r Outlier identification}
+Q1 <- quantile(GB$Issue.Price, 0.25)
+Q3 <- quantile(GB$Issue.Price, 0.75)
+IQR <-Q3-Q1
+lower.bound <- Q1 - 1.5 * IQR
+upper.bound <- Q3 + 1.5 * IQR
+outliers <- subset(GB, Issue.Price < lower.bound | Issue.Price > upper.bound) 
+```
+
+### Time-indexed outliers
+```{r Time-indexed outliers}
+mu.month <- mean(monthly.GB$MeanPrice, na.rm = TRUE)
+sd.month <- sd(monthly.GB$MeanPrice, na.rm = TRUE)
+
+monthly.GB$OutlierFlag <- with(monthly.GB,
+                               (MeanPrice > mu.month + 2*sd.month) |
+                               (MeanPrice < mu.month - 2*sd.month)
+                              )
+
+ggplot(monthly.GB, aes(x = YearMonth, y = MeanPrice)) +
+      geom_line(color = "chartreuse4") +
+      geom_point(data = subset(monthly.GB, OutlierFlag),
+                      aes(x = YearMonth, y = MeanPrice),
+                      color = "red", size = 2) + 
+      labs(title = "Monthly Mean Issue Price with Outliers Highlighted",
+                x = "Year-Month", y = "Average Issue Price  (% of Par Value)")
+```
+
+
+# Traditional time series: ARIMA-GARCH
+
+## Original ARIMA model selection
+
+### Visual check
+
+#### Seasonality
+
+```{r Seasonality check} 
+ggseasonplot(ts.monthly)
+findfrequency(ts.monthly) 
+``` 
+
+#### Stationarity: Yearly trend check
+
+```{r Yearly trend check}
+annual.GB <- data.frame(
+           Year      = as.numeric(names(annual.mean.price)),
+           MeanPrice = as.numeric(annual.mean.price)
+         )
+
+cor(annual.GB$Year, annual.GB$MeanPrice) 
+
+lm.fit <- lm(MeanPrice ~ Year, data = annual.GB) 
+
+summary(lm.fit) 
+```
+
+### Statistical tests 
+
+#### AIC for seasonality
+
+```{r AIC for seasonality}  
+fit1 <- arima(ts.monthly, order=c(2,0,1))
+fit2 <- arima(ts.monthly, order=c(2,0,1), seasonal=list(order=c(1,0,1), period=12))
+
+AIC.seasonality.summary <- data.frame(
+  `Model without seasonality` = AIC(fit1),
+  `Model with seasonality` = AIC(fit2)
+) 
+
+rownames(AIC.seasonality.summary) = "AIC" 
+
+checkresiduals(fit1)
+checkresiduals(fit2)  
+```
+
+#### ADF test
+
+```{r Stationarity test: ADF}
+adf.test(ts.monthly, alternative = "stationary") 
+```
+
+#### KPSS test
+
+```{r Stationarity test: KPSS}
+kpss.test(ts.monthly)
+```
+
+#### Number of difference
+
+```{r Number of difference}
+nsdiffs(ts.monthly)
+```
+
+#### Once-differenced Stationarity Test
+
+```{r Once-differenced Stationarity Test} 
+fit <- arima(ts.monthly,
+             order = c(2,0,1),
+             seasonal = list(order = c(1,0,1), period = 12))
+checkresiduals(fit)   
+```
+
+#### Drift term
+
+```{r drift term}
+auto.arima(ts.monthly, allowdrift = TRUE)
+auto.arima(ts.monthly, allowdrift = FALSE) 
+
+fit_drift <- arima(ts.monthly, order = c(2, 0, 1), include.mean = TRUE)
+summary(fit_drift)
+fit_nodrift <- arima(ts.monthly, order = c(2, 0, 1), include.mean = FALSE)
+summary(fit_nodrift)
+
+AIC.drift.summary <- data.frame(
+  `Model without drift term` = AIC(fit_nodrift),
+  `Model with drift term` = AIC(fit_drift)
+) 
+
+rownames(AIC.drift.summary) = "AIC" 
+```
+
+### Overall parameter selection
+
+```{r ARIMA auto}
+auto.arima(ts.monthly) 
+```
+
+```{r ARIMA manually}
+full.comparison <- data.frame(
+  Parameter = c("(1,0,0)", "(2,0,0)", "(1,0,1)", "(2,0,1)", "(1,1,1)"),
+  AIC = c(AIC(arima(ts.monthly, order = c(1,0,0))),
+          AIC(arima(ts.monthly, order = c(2,0,0))),
+          AIC(arima(ts.monthly, order = c(1,0,1))),
+          AIC(arima(ts.monthly, order = c(2,0,1))),
+          AIC(arima(ts.monthly, order = c(1,1,1)))),
+  BIC = c(BIC(arima(ts.monthly, order = c(1,0,0))),
+          BIC(arima(ts.monthly, order = c(2,0,0))),
+          BIC(arima(ts.monthly, order = c(1,0,1))),
+          BIC(arima(ts.monthly, order = c(2,0,1))),
+          BIC(arima(ts.monthly, order = c(1,1,1))))
+)
+full.comparison.sorted <- full.comparison[order(full.comparison$AIC),]  
+``` 
+
+### Residual validation
+
+```{r auto arima residuals}
+model0 <- auto.arima(ts.monthly)
+summary(model0)
+checkresiduals(model0)  
+``` 
+
+```{r manual arima residuals}
+model1 <- arima(ts.monthly, order=c(1,0,1))
+checkresiduals(model1)
+```
+
+```{r auto arima forecast}
+arima.forecast0 <- forecast(model0, h=6)
+print(arima.forecast0)
+```
+
+```{r manual arima forecast}
+arima.forecast1 <- forecast(model1, h=6)
+print(arima.forecast1)
+```
+
+## Log ARIMA model selection
+
+```{r log-diff ts fitting}
+GB.log.return <- diff(log(coredata(GB$Issue.Price)))  
+ts.log.return <- ts(GB.log.return, frequency = 12, start = c(2008, 1))  
+```
+
+### Statistical tests 
+
+#### AIC for seasonality
+
+```{r log-diff AIC for seasonality}  
+auto.arima(ts.log.return)
+l.fit1 <- arima(ts.log.return, order=c(1,0,2))
+l.fit2 <- arima(ts.log.return, order=c(1,0,2), seasonal=list(order=c(1,0,1), period=12))
+
+AIC.l.seasonality.summary <- data.frame(
+  `Model without seasonality` = AIC(l.fit1),
+  `Model with seasonality` = AIC(l.fit2)
+) 
+
+rownames(AIC.l.seasonality.summary) = "AIC" 
+
+checkresiduals(l.fit1)
+checkresiduals(l.fit2) 
+
+findfrequency(ts.log.return)  
+```
+
+#### ADF test
+
+```{r log-diff Stationarity test: ADF}
+adf.test(ts.log.return, alternative = "stationary") 
+```
+
+#### KPSS test
+
+```{r log-diff Stationarity test: KPSS}
+kpss.test(ts.log.return)
+```
+
+#### Number of difference
+
+```{r log-diff Number of difference}
+nsdiffs(ts.log.return)
+```
+
+#### Once-differenced Stationarity Test
+
+```{r log-diff Once-differenced Stationarity Test} 
+l.fit <- arima(ts.log.return,
+             order = c(1,0,2),
+             seasonal = list(order = c(1,0,1), period = 12))
+checkresiduals(l.fit)   
+```
+
+#### Drift term
+```{r log-diff drift term}
+auto.arima(ts.log.return, allowdrift = TRUE)
+auto.arima(ts.log.return, allowdrift = FALSE) 
+
+l.fit_drift <- arima(ts.log.return, order = c(1,0,2), include.mean = TRUE)
+summary(l.fit_drift)
+l.fit_nodrift <- arima(ts.log.return, order = c(1,0,2), include.mean = FALSE)
+summary(l.fit_nodrift)
+
+AIC.l.drift.summary <- data.frame(
+  `Model without drift term` = AIC(l.fit_nodrift),
+  `Model with drift term` = AIC(l.fit_drift)
+) 
+
+rownames(AIC.l.drift.summary) = "AIC" 
+```
+
+### Overall parameter selection
+
+```{r log-diff scale ARIMA auto}
+auto.arima(ts.log.return) 
+```
+
+### Residual validation
+
+```{r log-diff auto arima residuals}
+l.model0 <- auto.arima(ts.log.return)
+summary(l.model0)
+checkresiduals(l.model0)  
+```  
+
+```{r log-diff auto arima forecast}
+l.arima.forecast0 <- forecast(l.model0, h=6)
+print(l.arima.forecast0)
+```
+
+## GARCH
+
+```{r Fitting GARCH series, fig.width=16, fig.height=6}   
+par(mfrow = c(1, 3))
+plot.ts(ts.log.return, main = "Log Return Over time")
+acf(ts.log.return, main = "ACF of Log Return")
+pacf(ts.log.return, main = "PACF of Log Return")
+par(mfrow = c(1, 1)) 
+
+log.return.arima.fit <- auto.arima(ts.log.return)
+summary(log.return.arima.fit)
+```
+
+```{r Examine squared residuals of log.returns, fig.width=14, fig.height=6}
+resid.log.return.arima <- residuals(log.return.arima.fit)
+resid.log.return.arima.sqr <- residuals(log.return.arima.fit)^2
+
+par(mfrow = c(1, 2))
+plot.ts(resid.log.return.arima, main = "Return over time")
+plot.ts(resid.log.return.arima.sqr, main = "Return^2 over time")
+par(mfrow = c(1, 1))
+
+checkresiduals(log.return.arima.fit)  
+
+par(mfrow = c(1, 2))
+acf(resid.log.return.arima.sqr)
+pacf(resid.log.return.arima.sqr) 
+par(mfrow = c(1, 1)) 
+
+Box.test(resid.log.return.arima.sqr, lag=12, type='Ljung')
+
+library(FinTS)
+ArchTest(resid.log.return.arima.sqr, lags = 10)  
+ArchTest(resid.log.return.arima.sqr, lags = 5)  
+ArchTest(resid.log.return.arima.sqr, lags = 1) 
+```
+
+```{r Fitting GARCH} 
+spec <- ugarchspec( 
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),  
+  mean.model = list(armaOrder = c(log.return.arima.fit$arma[1],
+                                  log.return.arima.fit$arma[2]), include.mean = TRUE), 
+  distribution.model = "norm")
+
+garch.fit <- ugarchfit(spec, data = GB.log.return)
+show(garch.fit)
+```
+
+# Machine learning model: LSTM
+
+## Step 1: Load & Pre-process Data 
+
+#### 1.1 Joining Green Bond and Disaster
+
+```{r 1.1} 
+data <- diff(log(coredata(GB$Issue.Price)))  
+```
+
+#### 1.2 Train/test split 80/20
+
+```{r 1.2}
+n <- length(data) 
+train_n <- floor(0.8 * n) 
+train_y <- data[1:train_n]
+test_y <- data[(train_n + 1):n]
+```
+
+#### 1.3 Scale using train mean/sd
+
+```{r 1.3}
+m <- mean(train_y)
+s <- sd(train_y)
+
+train_sc <- (train_y - m) / s
+test_sc <- (test_y - m) / s
+```
+
+## Step 2: Sequence Generation
+
+#### 2.1 Overlapping sequences 
+
+```{r 2}
+create_sequences <- function(vec, seq_len) {
+  n_seq <- length(vec) - seq_len
+
+  x <- array(0, dim = c(n_seq, seq_len, 1))
+  y <- numeric(n_seq)
+
+  for (i in 1:n_seq) {
+    x[i,,1] <- vec[i:(i + seq_len - 1)]
+    y[i] <- vec[i + seq_len]
+  }
+
+  list(x = x, y = y)
+}
+```
+
+## Step 3: Build & Train One LSTM 
+
+```{r 3}
+
+fit_one <- function(cfg, vec_sc) {
+  
+  cut <- floor(0.9 * length(vec_sc))
+  tr_vec <- vec_sc[1:cut]
+  va_vec <- vec_sc[(cut + 1):length(vec_sc)] 
+  
+  tr_seq <- create_sequences(tr_vec, cfg$seq_len) 
+  va_seq <- create_sequences(va_vec, cfg$seq_len)
+  
+  model <- keras_model_sequential()
+  
+  for (l in seq_len(cfg$layers)) {               
+    model %>% layer_lstm(
+      units = cfg$units,                           
+      input_shape = if (l == 1) c(cfg$seq_len,1)   
+      else NULL, return_sequences = (l < cfg$layers),
+      dropout = cfg$dropout,                      
+      recurrent_dropout = cfg$dropout,
+      kernel_regularizer = regularizer_l2(1e-5)  
+    ) 
+  }
+  
+  model %>% layer_dense(units=1, use_bias = TRUE)  
+  model %>% compile(
+    loss = "mse",  
+    optimizer = optimizer_adam(learning_rate = cfg$lr),  
+    metrics = "mae" 
+  )
+  
+  es <- callback_early_stopping(patience = 10,    
+                                restore_best_weights = TRUE) 
+  
+  history <- model %>% fit(
+    x = tr_seq$x,   
+    y = tr_seq$y,    
+    epochs = 50,  
+    batch_size = cfg$batch_size, 
+    validation_data = list(va_seq$x, va_seq$y), 
+    verbose = 0,
+    callbacks = list(es)
+  )
+  val_mae <- min(history$metrics$val_mae) 
+  list(model = model, cfg = cfg, val_mae = val_mae, history = history) 
+}
+
+```
+
+## Step 4: Hyperparameter Grid & Random Search
+
+#### 4.1 Define the Hyperparameter Grid 
+
+```{r 4.1}
+hyper_grid <- list(
+  seq_len = c(40, 50),
+  layers = c(1, 2),
+  units = c(32, 64),
+  dropout = c(0.1, 0.2),
+  lr = c(1e-3, 5e-4, 2.5e-4),
+  batch_size = c(16, 32)
+) 
+```
+
+### 4.2 Random Sampling Function 
+
+```{r 4.2}
+random_configs <- function(grid, n_samples) { 
+  cfgs <- lapply(seq_len(n_samples),  
+                 function(i) {  
+                   as.data.frame(lapply(grid, function(v) sample(v,1)))
+                 })
+  do.call(rbind, cfgs)  
+}
+```
+
+### 4.3 Run the trials
+
+```{r 4.3}
+n_samples <- 10
+configs <- random_configs(hyper_grid, n_samples)
+results <- vector("list", n_samples)
+```
+
+### 4.4 Train each configuration
+```{r 4.4}
+for (i in seq_len(n_samples)) { 
+  cfg <- configs[i, ]
+  cat("Trial", i, "of", n_samples, " ")
+  res <- tryCatch(
+    fit_one(cfg, train_sc),
+    error = function(e) { cat("ERROR\n"); NULL }
+  )
+  if (!is.null(res)) { cat(sprintf("val_mae=%.4f\n", res$val_mae)) 
+    results[[i]] <- res
+  }
+}
+```
+
+### 4.5 Filter successful runs, fallback if none
+
+```{r 4.5}
+
+clean <- Filter(Negate(is.null), results)
+
+if (length(clean)==0) {
+  warning("All trials failed, using default.")
+  default_cfg <- list(seq_len=40, layers=1, units=16, 
+                      dropout=0.1, lr=1e-4, batch_size=16)
+  best_fit <- fit_one(default_cfg, train_sc)
+  
+} else { 
+  val_maes <- sapply(clean, '[[', "val_mae")
+  
+  best_fit <- clean[[which.min(val_maes)]]
+  
+  cat("Best config:"); 
+  print(best_fit$cfg); 
+  cat("\n")
+}
+
+best_model <- best_fit$model
+best_cfg <- best_fit$cfg
+best_history <- best_fit$history 
+plot(best_history)
+```
+
+## Step 5: Final Refit & Recursive Forecast 
+
+```{r 5}
+full_seq <- create_sequences(train_sc, best_cfg$seq_len) 
+
+recursive.forecast <- function(model, train_vec, test_vec, seq_len) {
+  hist <- train_vec
+  preds <- numeric(length(test_vec))
+  for (t in seq_along(test_vec)) {
+    x_in <- array(tail(hist, seq_len), dim=c(1,seq_len,1))
+    preds[t] <- model %>% predict(x_in, verbose=0)
+    hist <- c(hist, test_vec[t]) 
+  }
+  preds 
+}
+
+lstm_sc <- recursive.forecast(best_model, train_sc, test_sc, best_cfg$seq_len) 
+
+lstm.predicted.log.returns <- lstm_sc * s + m
+
+num.pred <- length(lstm.predicted.log.returns)
+start.id <- train_n
+end.id <- train_n + num.pred - 1 
+
+pre.prices <- GB$Issue.Price[start.id:end.id]
+lstm.predicted.prices <- pre.prices * exp(lstm.predicted.log.returns)
+```
+
+# ARIMA-GARCH Model
+
+## ARIMA forecast
+
+```{r ARIMA forecast 1}
+ARIMA.fit <- auto.arima(train_y, seasonal=FALSE)
+checkresiduals(ARIMA.fit)    
+
+ARIMA.pred <- numeric(length(test_y))
+hist.vec.1 <- train_y
+for (t in seq_along(test_y)) {
+  fit_t1 <- Arima(hist.vec.1, model=ARIMA.fit) 
+  ARIMA.pred[t] <- forecast(fit_t1, h=1)$mean 
+  hist.vec.1 <- c(hist.vec.1, test_y[t])
+}
+
+ARIMA.predicted.prices <- pre.prices * exp(ARIMA.pred)
+```
+
+## ARIMA-GARCH forecast
+
+```{r ARIMAGARCH forecast 1}
+spec <- ugarchspec(variance.model = list(model = "sGARCH", garchOrder = c(1, 1)), 
+                   mean.model = list(armaOrder = c(ARIMA.fit$arma[1], ARIMA.fit$arma[2]),
+                                     include.mean = TRUE),
+                   distribution.model = "norm")
+
+AG.fit <- ugarchfit(spec = spec, data = train_y) 
+
+roll <- ugarchroll(spec, data, n.ahead = 1, 
+                   forecast.length = length(test_y),
+                   refit.every = 10, 
+                   refit.window = "moving", solver = "solnp") 
+
+roll.forecast.df <- as.data.frame(roll)
+
+AG.pred <- roll.forecast.df$Mu
+AG.predicted.prices <- pre.prices * exp(AG.pred)
+```
+
+```{r GARCH predicted CI}
+AG.log.return.UB <- AG.pred + 1.96 * roll.forecast.df$Sigma
+AG.log.return.LB <- AG.pred - 1.96 * roll.forecast.df$Sigma
+ 
+AG.price.UB <- pre.prices * exp(AG.log.return.UB)
+AG.price.LB <- pre.prices * exp(AG.log.return.LB)
+```
+
+# Performance comparison
+
+## MAE and MSE
+
+```{r 7.1 MAE and MSE Comparison}
+mae <- function(a,b) mean(abs(a-b))
+mse <- function(a,b) mean((a-b)^2) 
+```
+
+```{r 7.2 Full comparison table log scale} 
+Comparison.log.tb <- data.frame(
+  Model = c("LSTM (tuned)", "ARIMA", "ARIMA_GARCH"),
+  MAE = format(c(
+    as.numeric(mae(test_y, lstm.predicted.log.returns)),
+    as.numeric(mae(test_y, ARIMA.pred)),
+    as.numeric(mae(test_y, AG.pred))
+  ), scientific = FALSE, digits = 5),
+  
+  MSE = format(c(
+    as.numeric(mse(test_y, lstm.predicted.log.returns)),
+    as.numeric(mse(test_y, ARIMA.pred)),
+    as.numeric(mse(test_y, AG.pred))
+  ), scientific = FALSE, digits = 5)
+) 
+```
+
+```{r 7.3 Full comparison table original scale}
+act.prices <- GB$Issue.Price[(start.id + 1):(end.id + 1)]
+
+Comparison.tb <- data.frame(
+  Model = c("LSTM (tuned)", "ARIMA", "ARIMA_GARCH"),
+  MAE = format(c(
+    as.numeric(mae(act.prices, lstm.predicted.prices)),
+    as.numeric(mae(act.prices, ARIMA.predicted.prices)),
+    as.numeric(mae(act.prices, AG.predicted.prices))
+  ), scientific = FALSE, digits = 5),
+  
+  MSE = format(c(
+    as.numeric(mse(act.prices, lstm.predicted.prices)),
+    as.numeric(mse(act.prices, ARIMA.predicted.prices)),
+    as.numeric(mse(act.prices, AG.predicted.prices))
+  ), scientific = FALSE, digits = 5)
+) 
+```
+
+## Residual analysis
+
+### LSTM residuals
+
+```{r LSTM log residuals Box-Ljung test}
+Box.test(lstm.predicted.log.returns, type = "Ljung-Box")
+```
+
+```{r LSTM log residuals vis, fig.width=16, fig.height=4, message=FALSE}
+act.dates <- GB$Issue.Date[(start.id + 1):(end.id + 1)]  
+
+lstm.log.res <- test_y - lstm.predicted.log.returns
+lstm.log.res.df <- data.frame(Date = act.dates, Residual = lstm.log.res) 
+
+log.res.lstm1 <- ggplot(lstm.log.res.df, aes(x = Date, y = Residual)) +
+  geom_line() +
+  labs(title = "LSTM Residuals (log-difference scale)", x = "Time Index", y = "Residual") +
+  theme_minimal() 
+
+log.res.lstm2 <- ggplot(lstm.log.res.df, aes(x = Residual)) +
+  geom_histogram() +
+  labs(title = "Residuals LSTM Histogram (log-difference scale)", x = "Date", y = "Residual")
+
+log.res.lstm3 <- ggAcf(lstm.log.res) + ggtitle("ACF of LSTM residuals (log-difference scale)")
+
+log.res.lstm1 + log.res.lstm2 + log.res.lstm3 + plot_layout(ncol = 3)
+```
+
+```{r lstm log cumulated error}
+plot(cumsum(lstm.log.res), type = "l", 
+     main = "Cumulative Error (log-difference scale)",
+     ylab = "Cumulative Residual",
+     xlab = "Time Index",
+     ylim = c(-0.5,0.5))
+abline(h = 0, lty = 2, col = "red")
+```
+
+```{r lstm cumulated error}
+lstm.res <- act.prices - lstm.predicted.prices
+
+plot(cumsum(lstm.res), type = "l", 
+     main = "Cumulative Error (original scale)",
+     ylab = "Cumulative Residual",
+     xlab = "Time Index")
+abline(h = 0, lty = 2, col = "red")
+```
+
+### ARIMA residuals
+
+```{r ARIMA log residuals}
+checkresiduals(ARIMA.pred) 
+```
+
+### ARIMA-GARCH residuals
+
+#### log-difference scale
+
+```{r ARIMA GARCH log residuals, fig.width=16, fig.height=6}
+AG.log.res <- test_y - AG.pred
+AG.log.res.df <- data.frame(Date = act.dates, Residual = as.numeric(AG.log.res))
+
+log.AG1 <- ggplot(AG.log.res.df, aes(x = Date, y = Residual)) +
+  geom_line() +
+  labs(title = "Residuals GARCH (log-difference scale)", x = "Date", y = "Residual")
+
+log.AG2 <- ggplot(AG.log.res.df, aes(x = Residual)) +
+  geom_histogram() +
+  labs(title = "Residuals GARCH Histogram (log-difference scale)", x = "Date", y = "Residual")
+
+log.AG3 <- ggAcf(AG.log.res) + ggtitle("ACF of GARCH residuals (log-difference scale)")
+
+log.AG1 + log.AG2 + log.AG3 + plot_layout(ncol = 3)
+```
+
+## Visualisation
+
+### Visualisation in log-difference scale
+
+```{r 8.1 log difference scale, fig.width=12, fig.height=4}
+time_idx <- GB$Issue.Date
+
+plot(time_idx[(train_n+1):n], test_y, type="l", col="black", lwd=3,
+     main="Green Bond Issue Price Forecast vs Actual (log-scale)", 
+     xlab="Time", ylab="Log price difference")
+lines(time_idx[(train_n+1):n], ARIMA.pred, col="red", lwd=1.4, lty = 5)
+lines(time_idx[(train_n+1):n], AG.pred, col="lightslateblue", lwd=1.6, lty = 6) 
+lines(time_idx[(train_n+1):n], lstm.predicted.log.returns, col="green3")  
+legend("bottomleft", 
+       legend=c("Actual","LSTM", "ARIMA", "ARIMA_GARCH"),
+       col=c("black","green3","red","lightslateblue"),
+       lty=c(1, 1, 5, 6), 
+       bty = "n",  
+       cex = 0.6, 
+       inset = 0.02)
+
+```
+
+### Visualisation in original scale
+
+```{r 8.2 Original scale, fig.width=10, fig.height=4}
+act.prices <- GB$Issue.Price[(start.id + 1):(end.id + 1)]
+
+plot(time_idx[(start.id + 1):(end.id + 1)], 
+  act.prices, type="l", col="black", lwd=3,
+  main="Green Bond Issue Price Forecast vs Actual (original scale)", 
+  xlab="Time", ylab="Issue Price (% of Par Value)",
+  ylim = c(96, 104))
+polygon(
+  c(time_idx[(start.id + 1):(end.id + 1)], rev(time_idx[(start.id + 1):(end.id + 1)])),          
+  c(AG.price.LB, rev(AG.price.UB)),     
+  col = adjustcolor("lightslateblue", alpha.f = 0.2),  
+  border = NA              
+)
+lines(time_idx[(start.id + 1):(end.id + 1)], ARIMA.predicted.prices, col="red", lwd=1.4, lty = 5)
+lines(time_idx[(start.id + 1):(end.id + 1)], AG.predicted.prices, col="lightslateblue",lwd=1.5, lty = 6) 
+lines(time_idx[(start.id + 1):(end.id + 1)], lstm.predicted.prices, col="green3")   
+legend("bottomleft", 
+       legend = c("Actual", "LSTM", "ARIMA", "ARIMA_GARCH", "Prediction Interval"),
+       col    = c("black","green3","red","lightslateblue", NA),   
+       lty    = c(1, 1, 5, 6, NA),                                   
+       lwd    = c(2, 1, 1.4, 1.6, 6),   
+       fill   = c(NA, NA, NA, NA, adjustcolor("lightslateblue", alpha.f = 0.3)), 
+       pch    = c(NA, NA, NA, NA, 15),  
+       pt.cex = c(1, 1, 1, 1, 2.5),     
+       border = NA,
+       bty    = "n",
+       cex    = 0.5, 
+       inset  = 0.02)
+```
