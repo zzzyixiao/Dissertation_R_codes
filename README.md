@@ -29,3 +29,7 @@ learning model (LSTM) on their ability to predict UK green bond prices.
 
 - Output include dataset summaries, model parameters, diagnostic plots, regression coefficients, simulation results. 
    Note that some tabular summaries are stored in variables rather than printed out.
+
+## Author
+
+Yvonne Zhang
