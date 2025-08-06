@@ -2,7 +2,8 @@
 # Dissertation_R_codes 
 
 This repository contains the R scripts used in the analysis of my industry project for MSc Actuarial Science. 
-This project consists of two research: We first demonstrates the how flood exposure affects financial performance across different supply
+
+The project consists of two research: We first demonstrates the how flood exposure affects financial performance across different supply
 chain roles, quantiles, and climate change assumptions by using quantile regression and
 Monte Carlo simulation. In parallel, we evaluate time series models (ARIMA, ARIMA-GARCH) and a deep
 learning model (LSTM) on their ability to predict UK green bond prices. 
@@ -13,7 +14,7 @@ learning model (LSTM) on their ability to predict UK green bond prices.
 
 - Dissertation_R_codes_2.Rmd: Main script for data loading and complete modelling for ARIMA, ARIMA-GARCH, and LSTM models
 
-- csv files: Datasets used in this 
+- csv files: Datasets used in this project 
 
 ## Dependencies
 
@@ -32,4 +33,4 @@ learning model (LSTM) on their ability to predict UK green bond prices.
 
 ## Author
 
-Yvonne Zhang
+(Yvonne) Yixiao Zhang
