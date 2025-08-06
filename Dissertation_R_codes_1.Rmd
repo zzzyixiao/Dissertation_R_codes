@@ -1,15 +1,18 @@
 ---
 title: "Dissertation_R_codes_1"
 author: "Yvonne Zhang"
-output: html_document
 date: "2025-07-31"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
 ---
 
 # Preparation 
 
 ```{r library package loading}
 # Uncomment and run this line if any packages are missing:
-# install.packages(c("kableExtra", "knitr", "tidyverse", "dplyr", "ggplot2", "kableExtra", "gridExtra", "ggsci", "RColorBrewer", "viridis","lattice", "caret", "vars", "scales", "jsonlite","sf", "stringr", "bestNormalize", "broom", "GGally", "quantreg","patchwork", "evd", "goftest", "ggpubr", "eva", "purrr", "simhelpers"))
+# install.packages(c("kableExtra", "knitr", "tidyverse", "dplyr", "ggplot2", "kableExtra", "gridExtra", "ggsci", "RColorBrewer", "viridis","lattice", "caret", "vars", "scales", "jsonlite","sf", "stringr", "bestNormalize", "broom", "GGally", "quantreg","patchwork", "evd", "goftest", "ggpubr", "eva", "purrr", "simhelpers", "openxlsx"))
 
 library(kableExtra)
 library(knitr)
@@ -38,6 +41,7 @@ library(ggpubr)
 library(eva)
 library(purrr)
 library(simhelpers)  
+library(openxlsx)
 ```
 
 ```{r Dataset loading}
@@ -1360,7 +1364,7 @@ lambda.SSP1 <- 1.0
 lambda.SSP3 <- 2.0
 regional.exposure <- c(England = 0.55, Scotland = 0.15, Wales = 0.15, Northern_Ireland = 0.15)
 years <- 2025:2035
-sim.n <- 1000
+sim.n <- 500
 ```
 
 ### Event frequency 
@@ -1867,7 +1871,7 @@ EBITDA.region.box.1 + EBITDA.region.box.3 + plot_layout(ncol = 2)
 ```{r EBITDA projection visual 2, fig.width=8, fig.height=4} 
 # Boxplot by Scenario, faceted by tau
 
-ggplot(EBITDA.margin.MC.forecast.results,
+EBITDA.tau.box <- ggplot(EBITDA.margin.MC.forecast.results,
        aes(x = Scenario, y = pred_values, fill = Scenario)) +
   geom_boxplot(outlier.size = 0.2) +
   scale_y_continuous(limits = c(-5, 20)) + 
@@ -2027,10 +2031,10 @@ TAT.region.box.3 <- TAT.MC.forecast.results %>%
 TAT.region.box.1 + TAT.region.box.3 + plot_layout(ncol = 2)
 ```
 
-```{r TAT projection visual 2, fig.width=8, fig.height=4} 
+```{r TAT projection visual 2, fig.width=16, fig.height=6} 
 # Boxplot by Scenario, faceted by tau
 
-ggplot(TAT.MC.forecast.results,
+TAT.tau.box <- ggplot(TAT.MC.forecast.results,
        aes(x = Scenario, y = pred_values, fill = Scenario)) +
   geom_boxplot(outlier.size = 0.2) +
   scale_y_continuous(limits = c(-5, 20)) + 
@@ -2040,9 +2044,9 @@ ggplot(TAT.MC.forecast.results,
   facet_wrap(~ tau, labeller = label_both) +
   theme_minimal()
 
-# Boxplot by Activities and tau, grouped by Region
-
+EBITDA.tau.box + TAT.tau.box + plot_layout(ncol = 2)
 ```
+
 
 ```{r TAT projection visual 3, fig.width=16, fig.height=6} 
 TAT.act.box.1 <- TAT.MC.forecast.results %>%
@@ -2162,3 +2166,76 @@ TAT.comb.3 <- ggplot(TAT.plot.combined3, aes(x = Year, y = mean_value,
 
 TAT.comb.1 + TAT.comb.3 + plot_layout(ncol = 2)
 ```
+
+# Excel Output
+
+## Store sample output
+```{r Store output in Excel}
+sample.sim <- sample(runs, 50)
+
+sampled.EBITDA.results <- EBITDA.margin.MC.forecast.results %>%
+  filter(Simulation %in% sample.sim)
+sampled.TAT.results <- TAT.MC.forecast.results %>%
+  filter(Simulation %in% sample.sim)
+
+MC.sampled.output.list <- list(
+  "EBITDA_Margin_Results" = sampled.EBITDA.results,
+  "TAT_Results" = sampled.TAT.results
+)
+
+WorkBook <- createWorkbook()
+
+for (name in names(MC.sampled.output.list)) {
+  addWorksheet(WorkBook, sheetName = name)
+  writeData(WorkBook, sheet = name, x = MC.sampled.output.list[[name]])
+}
+
+saveWorkbook(WorkBook, file = "Monte_Carlo_Forecast_Results_Sample.xlsx", overwrite = TRUE)
+```
+
+## Store summary statistics
+
+```{r Excel summary stats}
+interested <- c("Composite", "pred_values")
+EBITDA.MC.forecast.summary <- EBITDA.margin.MC.forecast.results %>%
+  group_by(Activities, Scenario) %>%
+  summarise(across(
+    all_of(interested),
+    list(
+      Mean   = ~mean(ifelse(is.na(.x), 0, .x)),
+      Q1     = ~quantile(ifelse(is.na(.x), 0, .x), 0.25),
+      Median = ~quantile(ifelse(is.na(.x), 0, .x), 0.5),
+      Q3     = ~quantile(ifelse(is.na(.x), 0, .x), 0.75),
+      Min    = ~min(ifelse(is.na(.x), 0, .x)),
+      Max    = ~max(ifelse(is.na(.x), 0, .x)),
+      SD     = ~sd(ifelse(is.na(.x), 0, .x))
+    ),
+    .names = "{.col}_{.fn}"
+  ))
+
+addWorksheet(WorkBook, "EBITDA_Forecast_Summary_Stats")
+writeData(WorkBook, sheet = "EBITDA_Forecast_Summary_Stats",
+          x = EBITDA.MC.forecast.summary)
+
+TAT.MC.forecast.summary <- TAT.MC.forecast.results %>%
+  group_by(Activities, Scenario) %>%
+  summarise(across(
+    all_of(interested),
+    list(
+      Mean   = ~mean(ifelse(is.na(.x), 0, .x)),
+      Q1     = ~quantile(ifelse(is.na(.x), 0, .x), 0.25),
+      Median = ~quantile(ifelse(is.na(.x), 0, .x), 0.5),
+      Q3     = ~quantile(ifelse(is.na(.x), 0, .x), 0.75),
+      Min    = ~min(ifelse(is.na(.x), 0, .x)),
+      Max    = ~max(ifelse(is.na(.x), 0, .x)),
+      SD     = ~sd(ifelse(is.na(.x), 0, .x))
+    ),
+    .names = "{.col}_{.fn}"
+  )) 
+
+addWorksheet(WorkBook, "TAT_Forecast_Summary_Stats")
+writeData(WorkBook, sheet = "TAT_Forecast_Summary_Stats",
+          x = TAT.MC.forecast.summary)
+ 
+saveWorkbook(WorkBook, file = "Monte_Carlo_Forecast_Results_Sample.xlsx", overwrite = TRUE)
+``` 
